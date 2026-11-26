@@ -16,7 +16,7 @@
  *  - Nothing uses CSS / Web Animations: those run at the display's refresh rate (144 Hz on
  *    the owner's laptop), and every presented frame costs GPU-process time.
  */
-import type { Scene, SceneLayer } from "../types";
+import type { Rect, Scene, SceneLayer } from "../types";
 import { context2d, createCanvas as makeCanvas, type AnyCanvas, type Ctx2D } from "./canvas";
 import { bayer, mulberry32, smoothstep } from "./dither";
 
@@ -187,6 +187,43 @@ export function createSpriteScene(style: SceneStyle): Scene {
   let stars: Star[] = [];
   let twinklers: Star[] = [];
   let glyphAtlas: { canvas: AnyCanvas; tile: number } | null = null;
+  // Cached layout geometry: avoids per-frame object allocations in the 60fps loop.
+  let cachedCentre = { x: 0, y: 0 };
+  let cachedFullBox: Rect = { x: 0, y: 0, width: 0, height: 0 };
+  let cachedStarBox: Rect = { x: 0, y: 0, width: 0, height: 0 };
+  let cachedWalkerBox: Rect = { x: 0, y: 0, width: 0, height: 0 };
+
+  /* Rare pixel shooting star: one brief diagonal streak every ~14 seconds. */
+  const SHOOT_PERIOD_SEC = 14.5;
+  const SHOOT_DURATION_SEC = 0.72;
+  const drawShootingStar = (ctx: Ctx2D, t: number) => {
+    const cycle = Math.floor(t / SHOOT_PERIOD_SEC);
+    const local = t - cycle * SHOOT_PERIOD_SEC;
+    if (local > SHOOT_DURATION_SEC || width < NARROW) return;
+    // Deterministic per-cycle start position in the upper half of the sky.
+    const h1 = ((Math.imul(cycle + style.seed, 2654435761) >>> 0) % 1000) / 1000;
+    const h2 = ((Math.imul(cycle * 3 + style.seed, 2246822519) >>> 0) % 1000) / 1000;
+    const progress = local / SHOOT_DURATION_SEC;
+    const ease = 1 - (1 - progress) * (1 - progress);
+    const startX = left + (width - left) * (0.15 + h1 * 0.55);
+    const startY = height * (0.06 + h2 * 0.24);
+    const travel = Math.min(220, width * 0.22);
+    const headX = startX + travel * ease;
+    const headY = startY + travel * 0.42 * ease;
+    const fade = Math.sin(progress * Math.PI);
+    const px = 2 / dpr;
+
+    ctx.fillStyle = "#FFFFFF";
+    const steps = 7;
+    for (let i = 0; i < steps; i++) {
+      const k = i / steps;
+      ctx.globalAlpha = fade * (1 - k) * 0.65;
+      const sx = Math.round((headX - k * 34) * dpr) / dpr;
+      const sy = Math.round((headY - k * 14.3) * dpr) / dpr;
+      ctx.fillRect(sx, sy, px, px);
+    }
+    ctx.globalAlpha = 1;
+  };
 
   /* Clouds and halo never change shape, so they are rasterised once per resize
    * and only moved or faded afterwards. */
@@ -328,12 +365,10 @@ export function createSpriteScene(style: SceneStyle): Scene {
     ctx.globalAlpha = 1;
   };
 
-  const emblemCentre = () => ({ x: left + (width - left) * EMBLEM_X, y: height * EMBLEM_Y });
-
   /* The night sky behind everything: painted once, it never moves. */
   const starfield: SceneLayer = {
     fps: 0,
-    box: () => ({ x: 0, y: 0, width, height }),
+    box: () => cachedFullBox,
     draw(ctx) {
       ctx.fillStyle = "#FFFFFF";
       for (const s of stars) if (!s.twinkle) drawStar(ctx, s, s.alpha);
@@ -341,11 +376,11 @@ export function createSpriteScene(style: SceneStyle): Scene {
     },
   };
 
-  /* A few stars twinkle, clouds glide (about one device pixel per frame) and faint glyphs
-   * breathe: all slow enough for 15 fps. */
+  /* A few stars twinkle, clouds glide (about one device pixel per frame), rare shooting
+   * stars streak by, and faint glyphs breathe: all slow enough for 15 fps. */
   const sky: SceneLayer = {
     fps: 15,
-    box: () => ({ x: 0, y: 0, width, height }),
+    box: () => cachedFullBox,
     draw(ctx, t) {
       ctx.fillStyle = "#FFFFFF";
       for (const s of twinklers) {
@@ -354,15 +389,10 @@ export function createSpriteScene(style: SceneStyle): Scene {
         drawStar(ctx, s, 0.08 + (s.alpha + 0.35) * wave * wave);
       }
       ctx.globalAlpha = 1;
+      drawShootingStar(ctx, t);
       drawClouds(ctx, t);
       drawAmbient(ctx, t);
     },
-  };
-
-  const starBox = () => {
-    const { x, y } = emblemCentre();
-    const half = Math.ceil(radius * HALO_REACH + 8);
-    return { x: Math.floor(x) - half, y: Math.floor(y) - half, width: half * 2, height: half * 2 };
   };
 
   /* Emblem keyframes: `a` holds frame `key`, `b` the one after it. */
@@ -376,8 +406,8 @@ export function createSpriteScene(style: SceneStyle): Scene {
   const renderKeyframe = (target: AnyCanvas, t: number) => {
     const ctx = context2d(target);
     if (!ctx) return;
-    const box = starBox();
-    const { x, y } = emblemCentre();
+    const box = cachedStarBox;
+    const { x, y } = cachedCentre;
     ctx.setTransform(dpr, 0, 0, dpr, -box.x * dpr, -box.y * dpr);
     ctx.clearRect(box.x, box.y, box.width, box.height);
     if (halo) {
@@ -392,7 +422,7 @@ export function createSpriteScene(style: SceneStyle): Scene {
 
   const star: SceneLayer = {
     fps: 60,
-    box: starBox,
+    box: () => cachedStarBox,
     draw(ctx, t, live) {
       const { a, b } = keyframes;
       if (!a || !b) return;
@@ -416,7 +446,7 @@ export function createSpriteScene(style: SceneStyle): Scene {
       const float = emblem.float;
       // Whole device pixels, so the glyph tiles are copied 1:1 and stay sharp.
       const lift = float ? Math.round(Math.sin(t * float.speed) * float.px * dpr) : 0;
-      const { x, y } = emblemCentre();
+      const { x, y } = cachedCentre;
 
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -439,16 +469,9 @@ export function createSpriteScene(style: SceneStyle): Scene {
   let mascotSprite: AnyCanvas | null = null;
   let mascotPose = Number.NaN;
 
-  const walkerBox = () => ({
-    x: width - MASCOT_RIGHT - mascot.width - MASCOT_STROLL * 2 - 2,
-    y: height - MASCOT_BOTTOM - mascot.height - mascot.bob - 2,
-    width: mascot.width + MASCOT_STROLL * 2 + 4,
-    height: mascot.height + mascot.bob * 2 + 4,
-  });
-
   const walker: SceneLayer = {
     fps: 60,
-    box: walkerBox,
+    box: () => cachedWalkerBox,
     draw(ctx, t) {
       if (!mascotSprite) return;
       const walking = Math.abs(Math.cos(t * MASCOT_STROLL_SPEED)) > 0.35;
@@ -462,7 +485,7 @@ export function createSpriteScene(style: SceneStyle): Scene {
           mascot.draw(sctx, pad, pad, t, walking);
         }
       }
-      const box = walkerBox();
+      const box = cachedWalkerBox;
       const stroll = Math.sin(t * MASCOT_STROLL_SPEED) * MASCOT_STROLL;
       const bob = Math.sin(t * mascot.bobSpeed) * mascot.bob;
       ctx.globalAlpha = 0.9;
@@ -489,22 +512,38 @@ export function createSpriteScene(style: SceneStyle): Scene {
       const area = w - left;
       radius = area < NARROW ? 70 : Math.min(210, Math.max(90, area * 0.125));
       const base = Math.min(70, Math.max(42, area * 0.04));
+
+      cachedCentre = { x: left + area * EMBLEM_X, y: height * EMBLEM_Y };
+      cachedFullBox = { x: 0, y: 0, width, height };
+      const half = Math.ceil(radius * HALO_REACH + 8);
+      cachedStarBox = {
+        x: Math.floor(cachedCentre.x) - half,
+        y: Math.floor(cachedCentre.y) - half,
+        width: half * 2,
+        height: half * 2,
+      };
+      cachedWalkerBox = {
+        x: width - MASCOT_RIGHT - mascot.width - MASCOT_STROLL * 2 - 2,
+        y: height - MASCOT_BOTTOM - mascot.height - mascot.bob - 2,
+        width: mascot.width + MASCOT_STROLL * 2 + 4,
+        height: mascot.height + mascot.bob * 2 + 4,
+      };
+
       clouds = area < NARROW ? [] : CLOUDS.map((c) => buildCloud(base * c.s));
       halo = buildHalo();
       glyphAtlas = buildGlyphAtlas();
       buildStars();
       emblem.prepare(radius, dpr);
 
-      const box = starBox();
-      keyframes.a = makeCanvas(Math.round(box.width * dpr), Math.round(box.height * dpr));
-      keyframes.b = makeCanvas(Math.round(box.width * dpr), Math.round(box.height * dpr));
+      keyframes.a = makeCanvas(Math.round(cachedStarBox.width * dpr), Math.round(cachedStarBox.height * dpr));
+      keyframes.b = makeCanvas(Math.round(cachedStarBox.width * dpr), Math.round(cachedStarBox.height * dpr));
       keyframes.key = Number.NaN;
       mascotSprite = makeCanvas((mascot.width + pad * 2) * dpr, (mascot.height + pad * 2) * dpr);
       mascotPose = Number.NaN;
     },
 
     backdrop() {
-      const { x, y } = emblemCentre();
+      const { x, y } = cachedCentre;
       const reach = Math.round(Math.max(width - left, height) * 0.75);
       return `radial-gradient(circle ${reach}px at ${Math.round(x)}px ${Math.round(y)}px, ${style.glow}, transparent)`;
     },

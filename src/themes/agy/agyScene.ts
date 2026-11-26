@@ -1,5 +1,12 @@
 import { context2d, createCanvas } from "../shared/canvas";
-import { BLOCK, CELL, createGlyphAtlas, shimmerGlyph, type GlyphAtlas } from "../shared/glyphs";
+import {
+  BLOCK,
+  CELL,
+  createGlyphAtlas,
+  shimmerGlyphAtTick,
+  shimmerTick,
+  type GlyphAtlas,
+} from "../shared/glyphs";
 import { createSpriteScene, type Emblem, type Mascot } from "../shared/scene";
 import type { Scene } from "../types";
 import { ANTIGRAVITY_PATH, ANTIGRAVITY_RAMPS } from "./logo";
@@ -118,10 +125,12 @@ function createArch(): Emblem {
         }
       }
 
+      const tick = shimmerTick(t);
+      const sweep = t * SWEEP_SPEED;
       for (const cell of cells) {
-        const light = Math.cos(cell.angle - t * SWEEP_SPEED);
+        const light = Math.cos(cell.angle - sweep);
         ctx.globalAlpha = 0.8 + 0.2 * light;
-        const glyph = shimmerGlyph(cell.dx / CELL, cell.dy / CELL, t);
+        const glyph = shimmerGlyphAtTick(cell.dx / CELL, cell.dy / CELL, tick);
         ctx.drawImage(
           canvas,
           glyph * tile,

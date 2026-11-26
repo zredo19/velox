@@ -1,6 +1,16 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Moon, Play, Plus, X } from "lucide-react";
-import type { SessionRecord } from "../types/ipc";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  ClipboardCopy,
+  Copy,
+  Moon,
+  Pencil,
+  Play,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react";
+import type { AgentKind, SessionRecord } from "../types/ipc";
 import type { AgentActivity } from "../lib/agentActivity";
 import { partitionSessions } from "../hooks/useSessions";
 import { AgentIcon } from "./icons/AgentIcons";
@@ -20,9 +30,12 @@ export interface SidebarProps {
   onSleepSession: (id: string) => void;
   onCloseSession: (id: string) => void;
   onRenameSession: (id: string, title: string) => void;
+  onDuplicateSession: (session: SessionRecord) => void;
+  onCopyPath: (path: string) => void;
   onReorderSessions: (sessionIds: string[]) => void;
   onSleepIdleSessions: () => void;
   onOpenLauncher: () => void;
+  onLaunchAgentKind?: (kind: AgentKind) => void;
 }
 
 const ANIMATION_STEP_MS = 100;
@@ -65,7 +78,7 @@ function formatMemory(mb: number): string {
   return `${Math.round(mb)} MB`;
 }
 
-export function Sidebar({
+export const Sidebar = memo(function Sidebar({
   sessions,
   activity,
   activeSessionId,
@@ -74,12 +87,17 @@ export function Sidebar({
   onSleepSession,
   onCloseSession,
   onRenameSession,
+  onDuplicateSession,
+  onCopyPath,
   onReorderSessions,
   onSleepIdleSessions,
   onOpenLauncher,
+  onLaunchAgentKind,
 }: SidebarProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterQuery, setFilterQuery] = useState("");
   const [contextMenu, setContextMenu] = useState<{
     sessionId: string;
     x: number;
@@ -94,15 +112,45 @@ export function Sidebar({
   } | null>(null);
 
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const filterInputRef = useRef<HTMLInputElement | null>(null);
   const asideRef = useRef<HTMLElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const suppressClickRef = useRef(false);
   const cleanupDragRef = useRef<(() => void) | null>(null);
-  useIconAnimation(asideRef, sessions.some((s) => activity[s.id] === "working"));
 
-  const groups = partitionSessions(sessions);
+  const anyWorking = useMemo(
+    () => sessions.some((s) => activity[s.id] === "working"),
+    [sessions, activity],
+  );
+  useIconAnimation(asideRef, anyWorking);
+
+  const filteredSessions = useMemo(() => {
+    const q = filterQuery.trim().toLowerCase();
+    if (!q) return sessions;
+    return sessions.filter((s) => {
+      const kind = s.activeAgent ?? s.agentKind;
+      return (
+        s.title.toLowerCase().includes(q) ||
+        s.cwd.toLowerCase().includes(q) ||
+        kind.toLowerCase().includes(q) ||
+        (s.profile && s.profile.toLowerCase().includes(q))
+      );
+    });
+  }, [sessions, filterQuery]);
+
+  const groups = useMemo(() => partitionSessions(filteredSessions), [filteredSessions]);
   const { awake: awakeSessions, sleeping: sleepingSessions, exited: exitedSessions } = groups;
+
+  // Map each session to its global 1-9 shortcut index from the unfiltered list
+  const shortcutIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    const visible = partitionSessions(sessions).visible;
+    for (let i = 0; i < Math.min(9, visible.length); i++) {
+      map.set(visible[i].id, i + 1);
+    }
+    return map;
+  }, [sessions]);
 
   const groupsRef = useRef(groups);
   groupsRef.current = groups;
@@ -117,6 +165,14 @@ export function Sidebar({
       renameInputRef.current.select();
     }
   }, [renamingId]);
+
+  useEffect(() => {
+    if (filterOpen) {
+      filterInputRef.current?.focus();
+    } else {
+      setFilterQuery("");
+    }
+  }, [filterOpen]);
 
   useLayoutEffect(() => {
     if (!contextMenu) {
@@ -188,6 +244,7 @@ export function Sidebar({
     group: SessionGroup,
     index: number,
   ) => {
+    if (filterQuery.trim()) return; // Disable drag-reorder while filtered
     if (e.button !== 0 || renamingId === session.id) return;
     if ((e.target as HTMLElement).closest("button, input")) return;
     if (groupsRef.current[group].length <= 1) return;
@@ -305,6 +362,7 @@ export function Sidebar({
             else rowRefs.current.delete(session.id);
           }}
           session={session}
+          shortcutIndex={shortcutIndexById.get(session.id)}
           activity={activity[session.id] ?? null}
           isActive={activeSessionId === session.id}
           isRenaming={renamingId === session.id}
@@ -337,29 +395,86 @@ export function Sidebar({
       );
     });
 
+  const menuSession = contextMenu
+    ? sessions.find((s) => s.id === contextMenu.sessionId) ?? null
+    : null;
+
   return (
-    <aside ref={asideRef} className="velox-sidebar w-[252px] shrink-0 flex flex-col h-full select-none overflow-hidden">
-      {/* Header with "+" launcher button */}
+    <aside
+      ref={asideRef}
+      className="velox-sidebar w-[256px] shrink-0 flex flex-col h-full select-none overflow-hidden"
+    >
+      {/* Header with filter toggle & "+" launcher button */}
       <div className="flex items-center justify-between h-11 px-3 border-b border-white/[0.06]">
         <span className="text-[12.5px] font-medium text-[var(--velox-ink-secondary)]">
           Sessions
           {sessions.length > 0 && (
-            <span className="ml-1.5 font-mono text-[11px] text-[var(--velox-ink-muted)]">
+            <span className="ml-1.5 font-mono text-[11px] text-[var(--velox-ink-muted)] tabular-nums">
               {awakeSessions.length}/{sessions.length}
             </span>
           )}
         </span>
-        <button
-          type="button"
-          onClick={onOpenLauncher}
-          title="New agent session (Ctrl+N)"
-          aria-label="New agent session"
-          className="h-7 px-2.5 inline-flex items-center gap-1 rounded-md bg-[var(--velox-accent)]/15 hover:bg-[var(--velox-accent)]/25 text-[var(--velox-accent-soft)] border border-[var(--velox-accent)]/30 text-[12px] font-medium transition-colors cursor-pointer"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          <span>New</span>
-        </button>
+        <div className="flex items-center gap-1">
+          {sessions.length > 1 && (
+            <button
+              type="button"
+              onClick={() => setFilterOpen((v) => !v)}
+              title="Filter sessions"
+              aria-label="Filter sessions"
+              className={`h-7 w-7 inline-flex items-center justify-center rounded-md transition-colors cursor-pointer ${
+                filterOpen || filterQuery
+                  ? "bg-[var(--velox-active)] text-[var(--velox-ink)]"
+                  : "text-[var(--velox-ink-muted)] hover:text-[var(--velox-ink)] hover:bg-[var(--velox-hover)]"
+              }`}
+            >
+              <Search className="w-3.5 h-3.5" />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onOpenLauncher}
+            title="New agent session (Ctrl+N)"
+            aria-label="New agent session"
+            className="h-7 px-2.5 inline-flex items-center gap-1 rounded-md bg-[var(--velox-accent)]/15 hover:bg-[var(--velox-accent)]/25 active:scale-[0.97] text-[var(--velox-accent-soft)] border border-[var(--velox-accent)]/30 text-[12px] font-medium transition-all duration-150 cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>New</span>
+          </button>
+        </div>
       </div>
+
+      {/* Collapsible inline filter input */}
+      {filterOpen && (
+        <div className="px-2.5 py-2 border-b border-white/[0.06] animate-velox-toast-in">
+          <div className="flex items-center gap-1.5 px-2 h-7 rounded-md bg-[var(--velox-canvas)]/75 border border-white/[0.09] focus-within:border-[var(--velox-accent)]/55 transition-colors">
+            <Search className="w-3 h-3 text-[var(--velox-ink-muted)] shrink-0" />
+            <input
+              ref={filterInputRef}
+              type="text"
+              value={filterQuery}
+              onChange={(e) => setFilterQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.stopPropagation();
+                  setFilterOpen(false);
+                }
+              }}
+              placeholder="Filter sessions..."
+              className="flex-1 min-w-0 bg-transparent text-[12px] text-[var(--velox-ink)] placeholder:text-[var(--velox-ink-muted)] outline-none"
+            />
+            {filterQuery && (
+              <button
+                type="button"
+                onClick={() => setFilterQuery("")}
+                aria-label="Clear filter"
+                className="text-[var(--velox-ink-muted)] hover:text-[var(--velox-ink)] cursor-pointer"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Session list */}
       <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
@@ -398,13 +513,29 @@ export function Sidebar({
             </button>
           </div>
         )}
+
+        {sessions.length > 0 && filteredSessions.length === 0 && (
+          <div className="py-10 px-3 text-center">
+            <p className="text-[12px] text-[var(--velox-ink-muted)]">
+              No sessions match "{filterQuery}"
+            </p>
+            <button
+              type="button"
+              onClick={() => setFilterQuery("")}
+              className="mt-2 text-[11.5px] text-[var(--velox-accent-soft)] hover:underline cursor-pointer"
+            >
+              Clear filter
+            </button>
+          </div>
+        )}
       </div>
 
-      {contextMenu && (
+      {/* Rich context menu */}
+      {contextMenu && menuSession && (
         <div
           ref={menuRef}
           role="menu"
-          className="fixed z-50 min-w-[140px] py-1 rounded-lg bg-[var(--velox-elevated)] border border-white/[0.1] shadow-xl"
+          className="fixed z-50 min-w-[176px] py-1 rounded-xl bg-[var(--velox-elevated)] border border-white/[0.11] shadow-[0_18px_40px_-12px_rgba(0,0,0,0.8)] animate-velox-pop-in"
           style={{
             left: menuPos?.left ?? contextMenu.x,
             top: menuPos?.top ?? contextMenu.y,
@@ -414,14 +545,78 @@ export function Sidebar({
           <button
             type="button"
             role="menuitem"
-            onClick={() => {
-              const target = sessions.find((s) => s.id === contextMenu.sessionId);
-              setContextMenu(null);
-              if (target) handleRenameStart(target);
-            }}
-            className="w-full px-3 py-1.5 text-left text-[12.5px] text-[var(--velox-ink)] hover:bg-[var(--velox-hover)] transition-colors cursor-pointer"
+            onClick={() => handleRenameStart(menuSession)}
+            className="w-full px-3 py-1.5 text-left text-[12px] text-[var(--velox-ink)] hover:bg-[var(--velox-hover)] flex items-center gap-2 transition-colors cursor-pointer"
           >
-            Renombrar
+            <Pencil className="w-3.5 h-3.5 text-[var(--velox-ink-muted)]" />
+            <span>Rename</span>
+          </button>
+
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setContextMenu(null);
+              if (menuSession.status === "sleeping" || menuSession.status === "exited") {
+                onWakeSession(menuSession.id);
+              } else {
+                onSleepSession(menuSession.id);
+              }
+            }}
+            className="w-full px-3 py-1.5 text-left text-[12px] text-[var(--velox-ink)] hover:bg-[var(--velox-hover)] flex items-center gap-2 transition-colors cursor-pointer"
+          >
+            {menuSession.status === "sleeping" || menuSession.status === "exited" ? (
+              <>
+                <Play className="w-3.5 h-3.5 text-[var(--velox-accent-soft)]" />
+                <span>Wake session</span>
+              </>
+            ) : (
+              <>
+                <Moon className="w-3.5 h-3.5 text-[var(--velox-ink-muted)]" />
+                <span>Sleep (free RAM)</span>
+              </>
+            )}
+          </button>
+
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setContextMenu(null);
+              onDuplicateSession(menuSession);
+            }}
+            className="w-full px-3 py-1.5 text-left text-[12px] text-[var(--velox-ink)] hover:bg-[var(--velox-hover)] flex items-center gap-2 transition-colors cursor-pointer"
+          >
+            <Copy className="w-3.5 h-3.5 text-[var(--velox-ink-muted)]" />
+            <span>Duplicate session</span>
+          </button>
+
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setContextMenu(null);
+              onCopyPath(menuSession.cwd);
+            }}
+            className="w-full px-3 py-1.5 text-left text-[12px] text-[var(--velox-ink)] hover:bg-[var(--velox-hover)] flex items-center gap-2 transition-colors cursor-pointer"
+          >
+            <ClipboardCopy className="w-3.5 h-3.5 text-[var(--velox-ink-muted)]" />
+            <span>Copy folder path</span>
+          </button>
+
+          <div className="my-1 border-t border-white/[0.07]" />
+
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setContextMenu(null);
+              onCloseSession(menuSession.id);
+            }}
+            className="w-full px-3 py-1.5 text-left text-[12px] text-rose-300 hover:bg-rose-500/15 flex items-center gap-2 transition-colors cursor-pointer"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>Close session</span>
           </button>
         </div>
       )}
@@ -432,7 +627,7 @@ export function Sidebar({
           <button
             type="button"
             onClick={onSleepIdleSessions}
-            className="w-full h-8 px-2.5 rounded-lg inline-flex items-center justify-center gap-1.5 text-[12px] text-[var(--velox-ink-soft)] hover:text-[var(--velox-ink)] hover:bg-[var(--velox-hover)] transition-colors cursor-pointer"
+            className="w-full h-8 px-2.5 rounded-lg inline-flex items-center justify-center gap-1.5 text-[12px] text-[var(--velox-ink-soft)] hover:text-[var(--velox-ink)] hover:bg-[var(--velox-hover)] active:scale-[0.985] transition-all duration-150 cursor-pointer"
           >
             <Moon className="w-3.5 h-3.5" />
             <span>Sleep idle sessions</span>
@@ -441,14 +636,15 @@ export function Sidebar({
       )}
 
       {/* The crew: Claude, Antigravity, OpenCode and Codex, happy to be here */}
-      <AgentCrew />
+      <AgentCrew onCritterClick={onLaunchAgentKind} />
     </aside>
   );
-}
+});
 
 interface SessionRowProps {
   rowRef: (el: HTMLDivElement | null) => void;
   session: SessionRecord;
+  shortcutIndex?: number;
   activity: AgentActivity | null;
   isActive: boolean;
   isRenaming: boolean;
@@ -468,9 +664,10 @@ interface SessionRowProps {
   onRenameCancel: () => void;
 }
 
-function SessionRow({
+const SessionRow = memo(function SessionRow({
   rowRef,
   session,
+  shortcutIndex,
   activity,
   isActive,
   isRenaming,
@@ -513,14 +710,24 @@ function SessionRow({
           onSelect(session.id);
         }
       }}
-      className={`group relative flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-colors cursor-pointer ${
-        isDragging ? "opacity-45" : ""
+      className={`group relative flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-all duration-150 cursor-pointer ${
+        isDragging ? "opacity-45 scale-[0.98]" : ""
       } ${
         isActive
-          ? "velox-row-active bg-[var(--velox-active)] border border-white/[0.09]"
+          ? "velox-row-active bg-[var(--velox-active)] border border-white/[0.1]"
           : "velox-row border border-transparent hover:bg-[var(--velox-elevated)]"
       }`}
     >
+      {/* Active glowing accent rail */}
+      <span
+        aria-hidden="true"
+        className={`pointer-events-none absolute left-0 top-2 bottom-2 w-[2.5px] rounded-r-full bg-[var(--velox-accent)] transition-all duration-200 ${
+          isActive
+            ? "opacity-100 scale-y-100 shadow-[0_0_8px_var(--velox-accent)]"
+            : "opacity-0 scale-y-50"
+        }`}
+      />
+
       {dropIndicator === "before" && (
         <div
           aria-hidden="true"
@@ -533,8 +740,12 @@ function SessionRow({
           className="pointer-events-none absolute left-1 right-1 -bottom-[3px] h-[2px] rounded-full bg-[var(--velox-accent)] shadow-[0_0_6px_var(--velox-accent)] z-20"
         />
       )}
+
       {/* Agent icon: moves while working, red while it waits for an answer */}
-      <div className="shrink-0" title={state === "blocked" ? "waiting for you" : state}>
+      <div
+        className="relative shrink-0"
+        title={state === "blocked" ? "Waiting for your input" : state}
+      >
         <span
           // Remounted on every state change, which also drops the animation styles.
           key={state}
@@ -548,6 +759,12 @@ function SessionRow({
             blocked={state === "blocked"}
           />
         </span>
+        {state === "blocked" && (
+          <span
+            aria-hidden="true"
+            className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-rose-500 ring-2 ring-[var(--velox-surface)] animate-pulse"
+          />
+        )}
       </div>
 
       {/* Title, profile pill & folder */}
@@ -570,7 +787,7 @@ function SessionRow({
                 onRenameCancel();
               }
             }}
-            className="w-full bg-[var(--velox-canvas)] border border-[var(--velox-accent)]/50 rounded px-1.5 py-0.5 text-[12.5px] text-[var(--velox-ink)] outline-none"
+            className="w-full bg-[var(--velox-canvas)] border border-[var(--velox-accent)]/55 rounded px-1.5 py-0.5 text-[12.5px] text-[var(--velox-ink)] outline-none"
           />
         ) : (
           <div className="flex items-center gap-1.5 min-w-0">
@@ -594,22 +811,41 @@ function SessionRow({
             )}
           </div>
         )}
-        <div className="truncate text-[11px] font-mono text-[var(--velox-ink-muted)]">
-          {getCwdBasename(session.cwd)}
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="truncate text-[11px] font-mono text-[var(--velox-ink-muted)]">
+            {getCwdBasename(session.cwd)}
+          </span>
+          {state === "blocked" && (
+            <span className="shrink-0 text-[9.5px] font-medium px-1 rounded bg-rose-500/18 text-rose-300">
+              input
+            </span>
+          )}
+          {state === "working" && (
+            <span className="shrink-0 text-[9.5px] font-medium text-[var(--velox-accent-soft)] opacity-85">
+              working
+            </span>
+          )}
         </div>
       </div>
 
-      {/* Right slot: RAM pill (default) swapped with action buttons on hover */}
-      <div className="shrink-0 flex items-center">
-        <span
-          className={`text-[11px] font-mono tabular-nums group-hover:hidden ${
-            isSleeping ? "text-[var(--velox-ink-faint)]" : "text-[var(--velox-ink-soft)]"
-          }`}
-        >
-          {formatMemory(session.memoryMb)}
-        </span>
+      {/* Right slot: RAM pill smoothly cross-fades to hover action buttons */}
+      <div className="relative shrink-0 flex items-center justify-end min-w-[46px] h-6">
+        <div className="flex items-center gap-1 transition-opacity duration-150 group-hover:opacity-0 group-hover:pointer-events-none">
+          {shortcutIndex !== undefined && (
+            <span className="text-[9.5px] font-mono text-[var(--velox-ink-faint)] opacity-0 group-focus-visible:opacity-100">
+              ^{shortcutIndex}
+            </span>
+          )}
+          <span
+            className={`text-[11px] font-mono tabular-nums ${
+              isSleeping ? "text-[var(--velox-ink-faint)]" : "text-[var(--velox-ink-soft)]"
+            }`}
+          >
+            {formatMemory(session.memoryMb)}
+          </span>
+        </div>
 
-        <div className="hidden group-hover:flex items-center gap-0.5">
+        <div className="absolute right-0 flex items-center gap-0.5 opacity-0 translate-x-1 pointer-events-none group-hover:opacity-100 group-hover:translate-x-0 group-hover:pointer-events-auto transition-all duration-150">
           {isSleeping || session.status === "exited" ? (
             <button
               type="button"
@@ -619,7 +855,7 @@ function SessionRow({
               }}
               title="Wake session"
               aria-label="Wake session"
-              className="h-6 w-6 flex items-center justify-center rounded text-[var(--velox-accent-soft)] hover:bg-white/[0.08] transition-colors cursor-pointer"
+              className="h-6 w-6 flex items-center justify-center rounded text-[var(--velox-accent-soft)] hover:bg-white/[0.1] active:scale-90 transition-all cursor-pointer"
             >
               <Play className="w-3 h-3 fill-current" />
             </button>
@@ -632,7 +868,7 @@ function SessionRow({
               }}
               title="Sleep session (free RAM)"
               aria-label="Sleep session"
-              className="h-6 w-6 flex items-center justify-center rounded text-[var(--velox-ink-secondary)] hover:text-[var(--velox-ink)] hover:bg-white/[0.08] transition-colors cursor-pointer"
+              className="h-6 w-6 flex items-center justify-center rounded text-[var(--velox-ink-secondary)] hover:text-[var(--velox-ink)] hover:bg-white/[0.1] active:scale-90 transition-all cursor-pointer"
             >
               <Moon className="w-3 h-3" />
             </button>
@@ -645,7 +881,7 @@ function SessionRow({
             }}
             title="Close session"
             aria-label="Close session"
-            className="h-6 w-6 flex items-center justify-center rounded text-[var(--velox-ink-soft)] hover:text-[#F43F5E] hover:bg-[#F43F5E]/15 transition-colors cursor-pointer"
+            className="h-6 w-6 flex items-center justify-center rounded text-[var(--velox-ink-soft)] hover:text-[#F43F5E] hover:bg-[#F43F5E]/15 active:scale-90 transition-all cursor-pointer"
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -653,4 +889,4 @@ function SessionRow({
       </div>
     </div>
   );
-}
+});

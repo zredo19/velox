@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { Moon, Play } from "lucide-react";
+import { Folder, Moon, Play, Sparkles } from "lucide-react";
 import { decodeBase64ToBytes, veloxApi } from "../lib/tauri";
 import type { PtyOutputEvent, SessionRecord } from "../types/ipc";
 import { AgentIcon } from "./icons/AgentIcons";
@@ -19,6 +19,7 @@ export interface TerminalPaneProps {
   fontFamily: string;
   fontSize: number;
   theme: AgentTheme;
+  clearTrigger?: number;
   onActivity: ReportActivity;
   onWake: (id: string, cols: number, rows: number) => void;
 }
@@ -31,6 +32,19 @@ function getCwdBasename(cwd: string): string {
   return parts[parts.length - 1] ?? cwd;
 }
 
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  if (chunks.length === 1) return chunks[0];
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    merged.set(c, offset);
+    offset += c.length;
+  }
+  return merged;
+}
+
 // Memoized: App re-renders on every telemetry tick, and every pane re-rendering with it is
 // wasted work. Props are stable (themes are shared objects, callbacks are memoized).
 export const TerminalPane = memo(function TerminalPane({
@@ -39,15 +53,18 @@ export const TerminalPane = memo(function TerminalPane({
   fontFamily,
   fontSize,
   theme,
+  clearTrigger = 0,
   onActivity,
   onWake,
 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const sleepRootRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const resizeTimerRef = useRef<number | null>(null);
   const webglRef = useRef<WebglAddon | null>(null);
   const copyNoticeTimerRef = useRef<number | undefined>(undefined);
+  const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
 
   const isSleeping = session.status === "sleeping";
@@ -73,45 +90,78 @@ export const TerminalPane = memo(function TerminalPane({
   );
   const paneNotice = pasteNotice ?? copyNotice;
 
+  const showCopyNotice = useCallback((message: string) => {
+    window.clearTimeout(copyNoticeTimerRef.current);
+    setCopyNotice(message);
+    copyNoticeTimerRef.current = window.setTimeout(() => {
+      setCopyNotice(null);
+    }, 1800);
+  }, []);
+
   // The only way a pane is resized. A hidden pane must be left alone: measuring it yields
   // a few columns, and that size would be pushed to the running process.
-  const fitIfVisible = useCallback(() => {
-    const container = containerRef.current;
-    const term = termRef.current;
-    if (!container || !term || container.clientWidth < 40 || container.clientHeight < 40) return;
-    try {
-      fitAddonRef.current?.fit();
-      // xterm 5.5 computes _scrollArea height from viewport.offsetHeight (0 while display:none)
-      // and fit() skips resize when cols/rows match, leaving scrollTop/scrollHeight stale.
-      const viewport = (
-        term as unknown as {
-          _core?: {
-            viewport?: {
-              _ignoreNextScrollEvent?: boolean;
-              _lastRecordedViewportHeight?: number;
-              syncScrollArea: (immediate?: boolean) => void;
+  const fitIfVisible = useCallback(
+    (forceResizeIpc = false) => {
+      const container = containerRef.current;
+      const term = termRef.current;
+      if (!container || !term || container.clientWidth < 40 || container.clientHeight < 40) return;
+      try {
+        fitAddonRef.current?.fit();
+        // xterm 5.5 computes _scrollArea height from viewport.offsetHeight (0 while display:none)
+        // and fit() skips resize when cols/rows match, leaving scrollTop/scrollHeight stale.
+        const viewport = (
+          term as unknown as {
+            _core?: {
+              viewport?: {
+                _ignoreNextScrollEvent?: boolean;
+                _lastRecordedViewportHeight?: number;
+                syncScrollArea: (immediate?: boolean) => void;
+              };
             };
-          };
+          }
+        )._core?.viewport;
+        if (viewport) {
+          viewport._ignoreNextScrollEvent = false;
+          viewport._lastRecordedViewportHeight = -1;
+          viewport.syncScrollArea(true);
         }
-      )._core?.viewport;
-      if (viewport) {
-        viewport._ignoreNextScrollEvent = false;
-        viewport._lastRecordedViewportHeight = -1;
-        viewport.syncScrollArea(true);
+        const prev = lastSentSizeRef.current;
+        if (forceResizeIpc || !prev || prev.cols !== term.cols || prev.rows !== term.rows) {
+          lastSentSizeRef.current = { cols: term.cols, rows: term.rows };
+          void veloxApi.resizePty(session.id, term.cols, term.rows);
+        }
+      } catch {
+        // Ignore transient resize errors
       }
-      void veloxApi.resizePty(session.id, term.cols, term.rows);
-    } catch {
-      // Ignore transient resize errors
-    }
-  }, [session.id]);
+    },
+    [session.id],
+  );
 
   const handleWake = useCallback(() => {
-    onWake(session.id, 120, 34);
-  }, [session.id, onWake]);
+    const el = sleepRootRef.current;
+    let cols = 120;
+    let rows = 34;
+    if (el && el.clientWidth > 120 && el.clientHeight > 120) {
+      const approxCellW = Math.max(6, fontSize * 0.62);
+      const approxCellH = Math.max(12, fontSize * 1.24);
+      cols = Math.max(40, Math.floor((el.clientWidth - 28) / approxCellW));
+      rows = Math.max(12, Math.floor((el.clientHeight - 20) / approxCellH));
+    }
+    onWake(session.id, cols, rows);
+  }, [session.id, fontSize, onWake]);
+
+  // Clear terminal screen when triggered from Command Palette
+  useEffect(() => {
+    if (clearTrigger > 0 && isActive && !isSleeping && termRef.current) {
+      termRef.current.clear();
+      termRef.current.focus();
+    }
+  }, [clearTrigger, isActive, isSleeping]);
 
   // Mount xterm.js only while awake; unmount when sleeping to release WebGL + DOM memory
   useEffect(() => {
     if (isSleeping) {
+      lastSentSizeRef.current = null;
       return;
     }
 
@@ -120,6 +170,7 @@ export const TerminalPane = memo(function TerminalPane({
 
     let disposed = false;
     let unlistenOutput: (() => void) | undefined;
+    lastSentSizeRef.current = null;
 
     const term = new Terminal({
       theme: theme.xterm,
@@ -158,6 +209,7 @@ export const TerminalPane = memo(function TerminalPane({
         const selection = term.getSelection();
         if (selection) {
           void navigator.clipboard.writeText(selection).catch(() => {});
+          showCopyNotice("Copied to clipboard");
         }
         return false;
       }
@@ -173,6 +225,7 @@ export const TerminalPane = memo(function TerminalPane({
         if (selection) {
           void navigator.clipboard.writeText(selection).catch(() => {});
           term.clearSelection();
+          showCopyNotice("Copied to clipboard");
           return false;
         }
         return true;
@@ -180,12 +233,14 @@ export const TerminalPane = memo(function TerminalPane({
 
       // Velox shortcuts: not sent to the PTY, handled by the window listener in App.
       // Plain Ctrl+B/M/H stay with the terminal program (Claude Code uses Ctrl+B; Ctrl+M is
-      // Enter and Ctrl+H Backspace). Plain Ctrl+N is Velox's "new session".
+      // Enter and Ctrl+H Backspace). Plain Ctrl+N, Ctrl+K, Ctrl+/, Ctrl+=/-/0 are Velox shortcuts.
       const key = ev.key.toLowerCase();
       if (
         ev.ctrlKey &&
         !ev.altKey &&
-        (ev.shiftKey ? ["n", "b", "m", "h"].includes(key) : /^[n,1-9]$/.test(key))
+        (ev.shiftKey
+          ? ["n", "b", "m", "h", "p"].includes(key)
+          : /^[n,k/0=+-1-9]$/.test(key))
       ) {
         return false;
       }
@@ -196,7 +251,7 @@ export const TerminalPane = memo(function TerminalPane({
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    fitIfVisible();
+    fitIfVisible(true);
     if (isActiveRef.current) {
       term.focus();
     }
@@ -218,13 +273,7 @@ export const TerminalPane = memo(function TerminalPane({
         .writeText(selection)
         .then(() => {
           if (disposed) return;
-          window.clearTimeout(copyNoticeTimerRef.current);
-          setCopyNotice(
-            count === 1 ? "1 carácter copiado" : `${count} caracteres copiados`,
-          );
-          copyNoticeTimerRef.current = window.setTimeout(() => {
-            setCopyNotice(null);
-          }, 2000);
+          showCopyNotice(count === 1 ? "Copied 1 char" : `Copied ${count} chars`);
         })
         .catch(() => {});
     };
@@ -273,13 +322,39 @@ export const TerminalPane = memo(function TerminalPane({
     });
 
     // Subscribe to live ConPTY output FIRST, then hydrate scrollback, merging both by stream
-    // offset. Fetching scrollback before subscribing dropped whatever the agent printed in
-    // between: on a brand-new session that is exactly its startup sequence (alternate screen,
-    // keyboard modes...), which left the pane looking like a frozen shell.
+    // offset. Coalesce high-frequency streaming bursts within a single animation frame so
+    // heavy output (diffs, builds) doesn't thrash xterm's parser/WebGL uploader.
     let hydrated = false;
     let streamGen = -1;
     let writtenEnd = 0;
     const pending: PtyOutputEvent[] = [];
+    const writeQueue: Uint8Array[] = [];
+    let flushRaf = 0;
+    let lastImmediateWrite = 0;
+
+    const flushWrites = () => {
+      flushRaf = 0;
+      if (disposed || writeQueue.length === 0) {
+        writeQueue.length = 0;
+        return;
+      }
+      const batch = concatBytes(writeQueue.splice(0));
+      term.write(batch);
+    };
+
+    const enqueueBytes = (bytes: Uint8Array) => {
+      const now = performance.now();
+      // First chunk after a brief quiet gap writes immediately (0ms typing echo latency).
+      if (flushRaf === 0 && writeQueue.length === 0 && now - lastImmediateWrite > 14) {
+        lastImmediateWrite = now;
+        term.write(bytes);
+        return;
+      }
+      writeQueue.push(bytes);
+      if (flushRaf === 0) {
+        flushRaf = requestAnimationFrame(flushWrites);
+      }
+    };
 
     const writeChunk = (ev: PtyOutputEvent) => {
       if (ev.generation < streamGen) return; // late chunk from a previous, killed PTY
@@ -293,13 +368,13 @@ export const TerminalPane = memo(function TerminalPane({
       const start = ev.endOffset - bytes.length;
       if (start < writtenEnd) bytes = bytes.subarray(writtenEnd - start);
       writtenEnd = ev.endOffset;
-      term.write(bytes);
+      enqueueBytes(bytes);
     };
 
     void (async () => {
       try {
-        const unlisten = await veloxApi.onPtyOutput((ev) => {
-          if (disposed || ev.sessionId !== session.id) return;
+        const unlisten = await veloxApi.subscribePtyOutput(session.id, (ev) => {
+          if (disposed) return;
           if (hydrated) writeChunk(ev);
           else pending.push(ev);
         });
@@ -338,12 +413,14 @@ export const TerminalPane = memo(function TerminalPane({
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);
       }
-      resizeTimerRef.current = window.setTimeout(fitIfVisible, 40);
+      resizeTimerRef.current = window.setTimeout(() => fitIfVisible(), 45);
     });
     observer.observe(container);
 
     return () => {
       disposed = true;
+      if (flushRaf) cancelAnimationFrame(flushRaf);
+      writeQueue.length = 0;
       observer.disconnect();
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);
@@ -404,7 +481,7 @@ export const TerminalPane = memo(function TerminalPane({
   // The PTY of a new or woken tab is spawned in the background: once it exists (pid set),
   // push the pane's real size to it.
   useEffect(() => {
-    if (session.pid != null) fitIfVisible();
+    if (session.pid != null) fitIfVisible(true);
   }, [session.pid, fitIfVisible]);
 
   // Live theme & transparency updates (activeAgent change or animated toggle) without remounting
@@ -441,6 +518,7 @@ export const TerminalPane = memo(function TerminalPane({
       if (selection) {
         void navigator.clipboard.writeText(selection).catch(() => {});
         term.clearSelection();
+        showCopyNotice("Copied to clipboard");
       } else {
         void navigator.clipboard
           .readText()
@@ -450,7 +528,7 @@ export const TerminalPane = memo(function TerminalPane({
           .catch(() => {});
       }
     },
-    [],
+    [showCopyNotice],
   );
 
   if (isSleeping) {
@@ -458,7 +536,8 @@ export const TerminalPane = memo(function TerminalPane({
 
     return (
       <div
-        className="relative z-10 h-full w-full bg-[var(--velox-canvas)] flex items-center justify-center p-6 outline-none"
+        ref={sleepRootRef}
+        className="relative z-10 h-full w-full bg-[var(--velox-canvas)] flex items-center justify-center p-6 outline-none velox-chrome-transition"
         tabIndex={0}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
@@ -467,35 +546,52 @@ export const TerminalPane = memo(function TerminalPane({
           }
         }}
       >
-        <div className="w-full max-w-[380px] rounded-2xl bg-[#11141C] border border-white/[0.07] p-7 text-center shadow-xl">
-          <div className="w-12 h-12 mx-auto rounded-xl bg-[#0B0D12] border border-white/[0.06] flex items-center justify-center">
+        {/* Soft ambient radial wash behind sleeping card */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 opacity-60"
+          style={{
+            background:
+              "radial-gradient(circle 420px at 50% 45%, color-mix(in srgb, var(--velox-accent) 12%, transparent), transparent 70%)",
+          }}
+        />
+
+        <div className="relative w-full max-w-[400px] rounded-2xl bg-[var(--velox-surface)]/95 border border-white/[0.08] p-7 text-center shadow-[0_24px_64px_-20px_rgba(0,0,0,0.75)] animate-velox-pop-in">
+          <div className="relative w-13 h-13 mx-auto rounded-2xl bg-[var(--velox-canvas)] border border-white/[0.08] flex items-center justify-center shadow-inner">
             <AgentIcon kind={effectiveKind} className="w-6 h-6" active={false} />
+            <span className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-[var(--velox-elevated)] border border-white/[0.1] flex items-center justify-center">
+              <Moon className="w-2.5 h-2.5 text-[var(--velox-accent-soft)]" />
+            </span>
           </div>
 
-          <h3 className="mt-4 text-[16px] font-medium text-[#E6EAF2] truncate">
+          <h3 className="mt-4 text-[16.5px] font-medium text-[var(--velox-ink)] truncate">
             {session.title}
           </h3>
-          <p className="mt-1 text-[12px] font-mono text-[#7E889E] truncate">
-            {getCwdBasename(session.cwd)}
+          <p
+            title={session.cwd}
+            className="mt-1 inline-flex items-center gap-1.5 text-[12px] font-mono text-[var(--velox-ink-soft)] max-w-full"
+          >
+            <Folder className="w-3 h-3 shrink-0 text-[var(--velox-ink-muted)]" />
+            <span className="truncate">{getCwdBasename(session.cwd)}</span>
           </p>
 
-          <div className="mt-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#171B26] border border-white/[0.06] text-[11.5px] font-mono tabular-nums text-[#7E889E]">
-            <Moon className="w-3 h-3 text-[#64708A]" />
-            <span>Sleeping · 0 MB RAM</span>
+          <div className="mt-3.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[var(--velox-elevated)] border border-white/[0.07] text-[11.5px] font-mono tabular-nums text-[var(--velox-ink-secondary)]">
+            <Sparkles className="w-3 h-3 text-[var(--velox-accent-soft)]" />
+            <span>Hibernated · 0 MB RAM</span>
           </div>
 
           <button
             type="button"
             onClick={handleWake}
-            className="mt-5 w-full h-9 px-4 rounded-lg bg-[#4E8DF5]/15 hover:bg-[#4E8DF5]/25 text-[#9CC2FF] border border-[#4E8DF5]/30 text-[13px] font-medium inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
+            className="mt-5 w-full h-10 px-4 rounded-xl bg-[var(--velox-accent)]/18 hover:bg-[var(--velox-accent)]/28 active:scale-[0.985] text-[var(--velox-accent-soft)] border border-[var(--velox-accent)]/35 hover:border-[var(--velox-accent)]/55 text-[13px] font-medium inline-flex items-center justify-center gap-2 transition-all duration-150 cursor-pointer shadow-[0_8px_24px_-12px_var(--velox-accent)]"
           >
             <Play className="w-3.5 h-3.5 fill-current" />
             <span>Wake session</span>
           </button>
 
-          <p className="mt-3 text-[11.5px] text-[#64708A]">
+          <p className="mt-3 text-[11.5px] text-[var(--velox-ink-muted)]">
             {session.agentSessionId
-              ? "Resumes previous conversation automatically"
+              ? "Resumes previous conversation automatically · Press Enter"
               : "Press Enter to launch agent in this folder"}
           </p>
         </div>
@@ -518,7 +614,7 @@ export const TerminalPane = memo(function TerminalPane({
       {paneNotice && (
         <div
           role="status"
-          className="pointer-events-none absolute right-3 top-3 max-w-[80%] px-3 py-1.5 rounded-lg bg-[var(--velox-elevated)] border border-white/[0.1] text-[12px] text-[var(--velox-ink)] shadow-lg"
+          className="pointer-events-none absolute right-3.5 top-3 max-w-[80%] px-3 py-1.5 rounded-lg bg-[var(--velox-elevated)]/95 border border-white/[0.12] text-[12px] text-[var(--velox-ink)] shadow-xl animate-velox-toast-in"
         >
           {paneNotice}
         </div>

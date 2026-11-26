@@ -19,12 +19,15 @@ Grab `velox.exe` from the [latest release](../../releases/latest) and run it (Wi
 
 | Keys | Action |
 |---|---|
+| `Ctrl+K` (or `Ctrl+Shift+P`) | Command palette (jump to session, launch agent, run actions) |
 | `Ctrl+N` (or `Ctrl+Shift+N`) | New agent session |
 | `Ctrl+1` … `Ctrl+9` | Switch to session 1–9 |
 | `Ctrl+Shift+B` | Toggle sidebar |
 | `Ctrl+Shift+M` | MCP gateway drawer |
 | `Ctrl+Shift+H` | Sleep the current session |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom in / out / reset terminal font size |
 | `Ctrl+,` | Settings |
+| `Ctrl+/` | Keyboard shortcuts |
 | `Ctrl+W` | Close session (outside the terminal) |
 | `Ctrl+Shift+C` / `Ctrl+V` | Copy / paste (images too) |
 

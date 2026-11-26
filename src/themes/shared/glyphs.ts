@@ -40,10 +40,19 @@ export function createGlyphAtlas(
   return { canvas, tile };
 }
 
+/** Compute the shimmer tick once per frame instead of per cell. */
+export function shimmerTick(timeSec: number): number {
+  return Math.floor((timeSec * 1000) / 150);
+}
+
 /** Stable per-cell glyph; about one cell in six changes on each tick, so the emblem shimmers. */
-export function shimmerGlyph(cx: number, cy: number, timeSec: number): number {
-  const tick = Math.floor((timeSec * 1000) / 150);
+export function shimmerGlyphAtTick(cx: number, cy: number, tick: number): number {
   const hash = (Math.imul(cx, 73856093) ^ Math.imul(cy, 19349663)) >>> 0;
   const swap = (hash + tick) % 6 === 0 ? tick : 0;
   return (hash + swap) % GLYPHS.length;
+}
+
+/** Backwards-compatible helper when a caller passes timeSec directly. */
+export function shimmerGlyph(cx: number, cy: number, timeSec: number): number {
+  return shimmerGlyphAtTick(cx, cy, shimmerTick(timeSec));
 }

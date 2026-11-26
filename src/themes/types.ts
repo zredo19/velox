@@ -46,9 +46,11 @@ export interface Scene {
   layers: SceneLayer[];
 }
 
+export type AgentThemeId = "default" | "claude" | "agy" | "codex" | "opencode";
+
 export interface AgentTheme {
   /** Used as the `data-agent-theme` attribute on the app root. */
-  id: "default" | "claude" | "agy";
+  id: AgentThemeId;
   /** Opaque CSS colour painted behind the canvas. */
   background: string;
   /** xterm palette. When `createScene` is set, `xterm.background` must be fully transparent. */

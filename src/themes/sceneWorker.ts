@@ -5,6 +5,8 @@
  */
 import { createAgyScene } from "./agy/agyScene";
 import { createClaudeScene } from "./claude/claudeScene";
+import { createCodexScene } from "./codex/codexScene";
+import { createOpencodeScene } from "./opencode/opencodeScene";
 import { runScene, type SceneLoop } from "./shared/sceneLoop";
 import type { Scene } from "./types";
 import type { SceneWorkerReply, SceneWorkerRequest } from "./sceneWorkerProtocol";
@@ -12,6 +14,8 @@ import type { SceneWorkerReply, SceneWorkerRequest } from "./sceneWorkerProtocol
 const SCENES: Record<string, () => Scene> = {
   agy: createAgyScene,
   claude: createClaudeScene,
+  codex: createCodexScene,
+  opencode: createOpencodeScene,
 };
 
 const port = self as unknown as {

@@ -17,7 +17,7 @@
   --velox-accent-soft: #9CC2FF;
 }
 
-/* Claude sessions: warm chrome. Redefined on the app root, so it only affects its subtree. */
+/* Claude sessions: warm espresso chrome. Redefined on the app root, so it only affects its subtree. */
 [data-agent-theme="claude"] {
   --velox-canvas: #17120F;
   --velox-surface: #1B1512;
@@ -33,7 +33,7 @@
   --velox-accent-soft: #F0A080;
 }
 
-/* Antigravity sessions: deep navy chrome. */
+/* Antigravity sessions: deep cosmic navy chrome. */
 [data-agent-theme="agy"] {
   --velox-canvas: #0B0E17;
   --velox-surface: #10152A;
@@ -49,6 +49,38 @@
   --velox-accent-soft: #9ED0FF;
 }
 
+/* Codex sessions: emerald obsidian chrome. */
+[data-agent-theme="codex"] {
+  --velox-canvas: #091311;
+  --velox-surface: #0D1A17;
+  --velox-elevated: #132521;
+  --velox-hover: #18302A;
+  --velox-active: #1D3A33;
+  --velox-ink: #E6F4F0;
+  --velox-ink-secondary: #98BCB2;
+  --velox-ink-muted: #5F847A;
+  --velox-ink-soft: #789F95;
+  --velox-ink-faint: #46665E;
+  --velox-accent: #1FC398;
+  --velox-accent-soft: #7CEAD0;
+}
+
+/* OpenCode sessions: twilight violet chrome. */
+[data-agent-theme="opencode"] {
+  --velox-canvas: #0E0C18;
+  --velox-surface: #141122;
+  --velox-elevated: #1C1830;
+  --velox-hover: #241F3D;
+  --velox-active: #2C264A;
+  --velox-ink: #ECE8F8;
+  --velox-ink-secondary: #ABA3C8;
+  --velox-ink-muted: #726A94;
+  --velox-ink-soft: #8D85B0;
+  --velox-ink-faint: #564E76;
+  --velox-accent: #A78BFA;
+  --velox-accent-soft: #DDD6FE;
+}
+
 html,
 body,
 #root {
@@ -61,6 +93,13 @@ body,
   color: var(--velox-ink);
   font-family: "Inter", "Segoe UI Variable", system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+.velox-chrome-transition {
+  transition:
+    background-color 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 180ms ease;
 }
 
 .font-mono,
@@ -81,10 +120,11 @@ body,
 ::-webkit-scrollbar-thumb {
   background: rgba(152, 162, 184, 0.18);
   border-radius: 9999px;
+  transition: background-color 150ms ease;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(152, 162, 184, 0.34);
+  background: rgba(152, 162, 184, 0.36);
 }
 
 /* Seamless xterm.js canvas integration */
@@ -117,6 +157,19 @@ main[data-velox-scene-main] {
   background-color: transparent;
 }
 
+/* Smooth collapsible sidebar wrapper */
+.velox-sidebar-shell {
+  position: relative;
+  z-index: 20;
+  flex-shrink: 0;
+  height: 100%;
+  overflow: hidden;
+  transition:
+    width 200ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 160ms ease;
+  will-change: width;
+}
+
 /* Above the scene and the terminal pane (its shadow falls on the terminal's left padding,
  * and the row context menu, which lives inside it, must not slip under the terminal). */
 .velox-sidebar {
@@ -124,26 +177,27 @@ main[data-velox-scene-main] {
   z-index: 20;
   background-color: var(--velox-surface);
   border-right: 1px solid rgba(255, 255, 255, 0.07);
+  transition:
+    background-color 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 220ms ease;
 }
 
 /* Over the scene: tinted glass (no blur: it would smear the tiny stars and re-filter the
  * wallpaper on every frame), a crisp divider with a soft accent glint, and a shadow that
  * lifts the panel off the terminal area. */
-[data-velox-scene] > .velox-sidebar {
+[data-velox-scene] .velox-sidebar {
   background-color: transparent;
-  background-image: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--velox-surface) 44%, transparent) 0%,
-    color-mix(in srgb, var(--velox-surface) 54%, transparent) 70%,
-    color-mix(in srgb, var(--velox-surface) 72%, transparent) 100%
-  );
+  background-image: linear-gradient(180deg,
+      color-mix(in srgb, var(--velox-surface) 44%, transparent) 0%,
+      color-mix(in srgb, var(--velox-surface) 54%, transparent) 70%,
+      color-mix(in srgb, var(--velox-surface) 74%, transparent) 100%);
   border-right-color: rgba(255, 255, 255, 0.11);
   box-shadow:
     1px 0 0 rgba(0, 0, 0, 0.4),
     12px 0 28px -14px rgba(0, 0, 0, 0.75);
 }
 
-[data-velox-scene] > .velox-sidebar::after {
+[data-velox-scene] .velox-sidebar::after {
   content: "";
   position: absolute;
   top: 0;
@@ -151,18 +205,16 @@ main[data-velox-scene-main] {
   right: 0;
   width: 1px;
   pointer-events: none;
-  background: linear-gradient(
-    180deg,
-    transparent 0%,
-    color-mix(in srgb, var(--velox-accent) 55%, transparent) 22%,
-    color-mix(in srgb, var(--velox-accent-soft) 30%, transparent) 60%,
-    transparent 100%
-  );
+  background: linear-gradient(180deg,
+      transparent 0%,
+      color-mix(in srgb, var(--velox-accent) 55%, transparent) 22%,
+      color-mix(in srgb, var(--velox-accent-soft) 30%, transparent) 60%,
+      transparent 100%);
 }
 
 /* Rows become glass too, so the sky still shows through a selected session. */
 [data-velox-scene] .velox-row-active {
-  background-color: color-mix(in srgb, var(--velox-active) 70%, transparent);
+  background-color: color-mix(in srgb, var(--velox-active) 72%, transparent);
 }
 
 [data-velox-scene] .velox-row:hover {
@@ -185,8 +237,13 @@ main[data-velox-scene-main] {
 .velox-crew-critter {
   position: relative;
   display: flex;
-  cursor: default;
+  cursor: pointer;
   transform-origin: 50% 100%;
+  transition: filter 160ms ease;
+}
+
+.velox-crew-critter:hover {
+  filter: brightness(1.12);
 }
 
 .velox-crew-critter[data-act="hop"],
@@ -207,35 +264,58 @@ main[data-velox-scene-main] {
   0% {
     transform: translateY(0) scale(1, 1);
   }
+
   18% {
     transform: translateY(0) scale(1.1, 0.88);
   }
+
   45% {
     transform: translateY(-6px) scale(0.94, 1.07);
   }
+
   72% {
     transform: translateY(0) scale(1.07, 0.93);
   }
+
   100% {
     transform: translateY(0) scale(1, 1);
   }
 }
 
 @keyframes velox-crew-blink {
+
   0%,
   100% {
     transform: scaleY(1);
   }
+
   50% {
     transform: scaleY(0.15);
   }
 }
 
+/* ---- UI Motion Primitives ------------------------------------------------------------ */
+
+@keyframes velox-fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-velox-fade-in {
+  animation: velox-fade-in 150ms ease-out;
+}
+
 @keyframes velox-slide-in {
   from {
     opacity: 0;
-    transform: translateX(14px);
+    transform: translateX(18px);
   }
+
   to {
     opacity: 1;
     transform: translateX(0);
@@ -243,14 +323,15 @@ main[data-velox-scene-main] {
 }
 
 .animate-velox-slide-in {
-  animation: velox-slide-in 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  animation: velox-slide-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @keyframes velox-pop-in {
   from {
     opacity: 0;
-    transform: translateY(6px) scale(0.985);
+    transform: translateY(8px) scale(0.975);
   }
+
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
@@ -258,12 +339,69 @@ main[data-velox-scene-main] {
 }
 
 .animate-velox-pop-in {
-  animation: velox-pop-in 130ms cubic-bezier(0.16, 1, 0.3, 1);
+  animation: velox-pop-in 165ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes velox-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-velox-toast-in {
+  animation: velox-toast-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes velox-card-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-velox-card-rise {
+  animation: velox-card-rise 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Keyboard keycap styling */
+.velox-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.35rem;
+  height: 1.25rem;
+  padding: 0 0.35rem;
+  border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--velox-ink-secondary);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.35);
 }
 
 @media (prefers-reduced-motion: reduce) {
+
+  .animate-velox-fade-in,
   .animate-velox-slide-in,
-  .animate-velox-pop-in {
-    animation: none;
+  .animate-velox-pop-in,
+  .animate-velox-toast-in,
+  .animate-velox-card-rise,
+  .velox-sidebar-shell,
+  .velox-chrome-transition {
+    animation: none !important;
+    transition: none !important;
   }
 }

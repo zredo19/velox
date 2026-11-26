@@ -1,5 +1,12 @@
 import { bayer } from "../shared/dither";
-import { BLOCK, CELL, createGlyphAtlas, shimmerGlyph, type GlyphAtlas } from "../shared/glyphs";
+import {
+  BLOCK,
+  CELL,
+  createGlyphAtlas,
+  shimmerGlyphAtTick,
+  shimmerTick,
+  type GlyphAtlas,
+} from "../shared/glyphs";
 import { createSpriteScene, type Emblem, type Mascot } from "../shared/scene";
 import type { Scene } from "../types";
 
@@ -102,6 +109,7 @@ function createBurst(): Emblem {
 
       const core = radius * 0.2;
       const sweep = t * SWEEP_SPEED;
+      const tick = shimmerTick(t);
       const { canvas, tile } = atlas;
 
       for (const cell of cellsFor(bx, by)) {
@@ -122,7 +130,7 @@ function createBurst(): Emblem {
         const light = Math.cos(cell.angle - sweep);
         const k = dist / longest + cell.dither * 0.18 - light * SWEEP_DEPTH;
         const shade = Math.min(SHADES.length - 1, Math.max(0, Math.floor(k * SHADES.length)));
-        const glyph = shimmerGlyph(cell.cx, cell.cy, t);
+        const glyph = shimmerGlyphAtTick(cell.cx, cell.cy, tick);
         ctx.drawImage(canvas, glyph * tile, shade * tile, tile, tile, cell.cx * CELL, cell.cy * CELL, BLOCK, BLOCK);
       }
     },

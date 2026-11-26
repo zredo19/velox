@@ -306,6 +306,10 @@ export function useSessions() {
     }
   }, []);
 
+  const clearError = useCallback(() => {
+    setError(null);
+  }, []);
+
   const activeSession =
     sessions.find((s) => s.id === activeSessionId) ?? null;
 
@@ -318,6 +322,7 @@ export function useSessions() {
     activeSession,
     loading,
     error,
+    clearError,
     createSession,
     selectSession,
     wakeSession,

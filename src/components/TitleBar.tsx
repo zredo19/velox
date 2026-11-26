@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Copy,
   Cpu,
+  Keyboard,
   Minus,
   PanelLeft,
   Plus,
+  Search,
   Settings,
   Square,
   X,
@@ -21,7 +23,12 @@ export interface TitleBarProps {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   onOpenLauncher: () => void;
+  onOpenPalette: () => void;
+  onOpenShortcuts: () => void;
+  onCopyPath?: (path: string) => void;
   activeSession: SessionRecord | null;
+  blockedCount?: number;
+  workingCount?: number;
   telemetry: SystemTelemetry | null;
   mcp: McpGatewaySnapshot | null;
   mcpDrawerOpen: boolean;
@@ -41,11 +48,16 @@ function formatMb(mb: number): string {
   return `${Math.round(mb)} MB`;
 }
 
-export function TitleBar({
+export const TitleBar = memo(function TitleBar({
   sidebarOpen,
   onToggleSidebar,
   onOpenLauncher,
+  onOpenPalette,
+  onOpenShortcuts,
+  onCopyPath,
   activeSession,
+  blockedCount = 0,
+  workingCount = 0,
   telemetry,
   mcp,
   mcpDrawerOpen,
@@ -108,7 +120,7 @@ export function TitleBar({
 
   const totalMb = telemetry?.totalMemoryMb ?? 0;
   const ramTooltip = telemetry
-    ? `Total ${formatMb(telemetry.totalMemoryMb)} — App ${formatMb(telemetry.appMemoryMb)} · Agents ${formatMb(telemetry.sessionsMemoryMb)} · MCP ${formatMb(telemetry.mcpMemoryMb)}`
+    ? `Total ${formatMb(telemetry.totalMemoryMb)} — App ${formatMb(telemetry.appMemoryMb)} · Agents ${formatMb(telemetry.sessionsMemoryMb)} · MCP ${formatMb(telemetry.mcpMemoryMb)} (click to inspect)`
     : "Memory telemetry";
 
   const activeMcps = mcp?.activeBackends ?? 0;
@@ -116,7 +128,7 @@ export function TitleBar({
   const cwdBasename = activeSession ? getPathBasename(activeSession.cwd) : "";
 
   return (
-    <header className="h-10 shrink-0 bg-[var(--velox-surface)] border-b border-white/[0.07] select-none flex items-center justify-between pl-2.5 pr-0">
+    <header className="h-10 shrink-0 bg-[var(--velox-surface)] border-b border-white/[0.07] select-none flex items-center justify-between pl-2.5 pr-0 velox-chrome-transition">
       {/* Left navigation & quick-launch controls */}
       <div className="flex items-center gap-1.5">
         <button
@@ -124,13 +136,21 @@ export function TitleBar({
           onClick={onToggleSidebar}
           title={sidebarOpen ? "Hide sidebar (Ctrl+Shift+B)" : "Show sidebar (Ctrl+Shift+B)"}
           aria-label="Toggle sidebar"
-          className={`h-7 w-7 flex items-center justify-center rounded-md transition-colors ${
+          className={`relative h-7 w-7 flex items-center justify-center rounded-md transition-all duration-150 active:scale-95 cursor-pointer ${
             sidebarOpen
               ? "text-[var(--velox-ink-secondary)] hover:text-[var(--velox-ink)] hover:bg-[var(--velox-hover)]"
               : "text-[var(--velox-ink-muted)] hover:text-[var(--velox-ink)] hover:bg-[var(--velox-hover)]"
           }`}
         >
           <PanelLeft className="w-3.5 h-3.5" />
+          {/* Surface background tab alerts when the sidebar is collapsed */}
+          {!sidebarOpen && (blockedCount > 0 || workingCount > 0) && (
+            <span
+              className={`absolute top-1 right-1 w-1.5 h-1.5 rounded-full ${
+                blockedCount > 0 ? "bg-rose-500 animate-pulse" : "bg-[var(--velox-accent)]"
+              }`}
+            />
+          )}
         </button>
 
         <div className="flex items-center gap-1.5 pl-0.5 pr-1">
@@ -145,10 +165,22 @@ export function TitleBar({
           onClick={onOpenLauncher}
           title="New agent session (Ctrl+N)"
           aria-label="New agent session"
-          className="h-6 px-2 flex items-center gap-1 rounded-md text-[12px] font-medium text-[var(--velox-accent-soft)] bg-[var(--velox-accent)]/12 hover:bg-[var(--velox-accent)]/22 border border-[var(--velox-accent)]/25 transition-colors cursor-pointer"
+          className="h-6 px-2 flex items-center gap-1 rounded-md text-[12px] font-medium text-[var(--velox-accent-soft)] bg-[var(--velox-accent)]/14 hover:bg-[var(--velox-accent)]/24 active:scale-[0.97] border border-[var(--velox-accent)]/28 transition-all duration-150 cursor-pointer"
         >
           <Plus className="w-3.5 h-3.5" />
           <span className="hidden sm:inline">New</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onOpenPalette}
+          title="Command palette (Ctrl+K)"
+          aria-label="Open command palette"
+          className="hidden lg:inline-flex h-6 px-2 items-center gap-1.5 rounded-md bg-white/[0.03] hover:bg-[var(--velox-hover)] border border-white/[0.06] text-[11.5px] text-[var(--velox-ink-muted)] hover:text-[var(--velox-ink-secondary)] transition-colors cursor-pointer"
+        >
+          <Search className="w-3 h-3" />
+          <span>Search…</span>
+          <span className="text-[10px] font-mono text-[var(--velox-ink-faint)] pl-1">Ctrl K</span>
         </button>
       </div>
 
@@ -161,19 +193,22 @@ export function TitleBar({
         {activeSession ? (
           <div
             data-tauri-drag-region
-            className="flex items-center gap-2 min-w-0 max-w-md pointer-events-none"
+            className="flex items-center gap-2 min-w-0 max-w-md"
           >
             <AgentIcon
               kind={activeSession.activeAgent ?? activeSession.agentKind}
-              className="w-3.5 h-3.5 shrink-0"
+              className="w-3.5 h-3.5 shrink-0 pointer-events-none"
               active={activeSession.status !== "sleeping"}
             />
-            <span className="text-[12.5px] font-medium text-[var(--velox-ink)] truncate">
+            <span
+              data-tauri-drag-region
+              className="text-[12.5px] font-medium text-[var(--velox-ink)] truncate"
+            >
               {activeSession.title}
             </span>
             {activeSession.profile && (
               <span
-                className="text-[11px] px-1.5 py-0.2 rounded bg-white/[0.06] shrink-0"
+                className="text-[10.5px] px-1.5 py-0.2 rounded bg-white/[0.06] shrink-0 pointer-events-none"
                 style={{
                   color:
                     activeSession.profile === "trabajo" ? "#7DD3C8" : "#E8B4D9",
@@ -182,9 +217,14 @@ export function TitleBar({
                 {activeSession.profile}
               </span>
             )}
-            <span className="text-[11.5px] font-mono text-[var(--velox-ink-muted)] truncate hidden md:inline">
+            <button
+              type="button"
+              onClick={() => onCopyPath?.(activeSession.cwd)}
+              title={`Copy path: ${activeSession.cwd}`}
+              className="text-[11.5px] font-mono text-[var(--velox-ink-muted)] hover:text-[var(--velox-ink-secondary)] truncate hidden md:inline px-1.5 py-0.5 rounded hover:bg-white/[0.05] transition-colors cursor-pointer"
+            >
               {cwdBasename}
-            </span>
+            </button>
           </div>
         ) : (
           <span
@@ -199,33 +239,47 @@ export function TitleBar({
       {/* Right telemetry pills & native Windows window controls */}
       <div className="flex items-center h-full">
         <div className="flex items-center gap-1.5 pr-2">
-          <div
+          <button
+            type="button"
+            onClick={onToggleMcpDrawer}
             title={ramTooltip}
-            className="h-6 px-2 flex items-center gap-1.5 rounded-md bg-white/[0.03] border border-white/[0.06] text-[11.5px] font-mono tabular-nums text-[var(--velox-ink-secondary)]"
+            className="h-6 px-2 flex items-center gap-1.5 rounded-md bg-white/[0.03] hover:bg-[var(--velox-hover)] border border-white/[0.06] text-[11.5px] font-mono tabular-nums text-[var(--velox-ink-secondary)] hover:text-[var(--velox-ink)] transition-colors cursor-pointer"
           >
             <Cpu className="w-3 h-3 text-[var(--velox-ink-muted)]" />
             <span>{formatMb(totalMb)}</span>
-          </div>
+          </button>
 
           <button
             type="button"
             onClick={onToggleMcpDrawer}
             title="Lazy MCP Gateway controls (Ctrl+Shift+M)"
             aria-label="Toggle Lazy MCP Gateway drawer"
-            className={`h-6 px-2 flex items-center gap-1.5 rounded-md border text-[11.5px] font-mono tabular-nums transition-colors cursor-pointer ${
+            className={`h-6 px-2 flex items-center gap-1.5 rounded-md border text-[11.5px] font-mono tabular-nums transition-all duration-150 cursor-pointer ${
               mcpDrawerOpen
-                ? "bg-[var(--velox-active)] border-white/[0.14] text-[var(--velox-ink)]"
+                ? "bg-[var(--velox-active)] border-[var(--velox-accent)]/40 text-[var(--velox-ink)]"
                 : "bg-white/[0.03] border-white/[0.06] text-[var(--velox-ink-secondary)] hover:text-[var(--velox-ink)] hover:bg-[var(--velox-hover)]"
             }`}
           >
             <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                activeMcps > 0 ? "bg-emerald-400" : "bg-[var(--velox-ink-faint)]"
+              className={`w-1.5 h-1.5 rounded-full transition-colors ${
+                activeMcps > 0
+                  ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.75)]"
+                  : "bg-[var(--velox-ink-faint)]"
               }`}
             />
             <span>
               MCP {activeMcps}/{totalMcps}
             </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenShortcuts}
+            title="Keyboard shortcuts (Ctrl+/)"
+            aria-label="Keyboard shortcuts"
+            className="h-6 w-6 flex items-center justify-center rounded-md text-[var(--velox-ink-soft)] hover:text-[var(--velox-ink)] hover:bg-[var(--velox-hover)] transition-colors cursor-pointer"
+          >
+            <Keyboard className="w-3.5 h-3.5" />
           </button>
 
           {onOpenSettings && (
@@ -275,4 +329,4 @@ export function TitleBar({
       </div>
     </header>
   );
-}
+});
