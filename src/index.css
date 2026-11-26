@@ -1,0 +1,269 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --velox-canvas: #0B0D12;
+  --velox-surface: #11141C;
+  --velox-elevated: #171B26;
+  --velox-hover: #1C2130;
+  --velox-active: #1F2638;
+  --velox-border: rgba(255, 255, 255, 0.07);
+  --velox-ink: #E6EAF2;
+  --velox-ink-secondary: #98A2B8;
+  --velox-ink-muted: #64708A;
+  --velox-ink-soft: #7E889E;
+  --velox-ink-faint: #52607A;
+  --velox-accent: #4E8DF5;
+  --velox-accent-soft: #9CC2FF;
+}
+
+/* Claude sessions: warm chrome. Redefined on the app root, so it only affects its subtree. */
+[data-agent-theme="claude"] {
+  --velox-canvas: #17120F;
+  --velox-surface: #1B1512;
+  --velox-elevated: #231B17;
+  --velox-hover: #2A201B;
+  --velox-active: #33261F;
+  --velox-ink: #F2EAE4;
+  --velox-ink-secondary: #B8A89E;
+  --velox-ink-muted: #85746A;
+  --velox-ink-soft: #9C8B80;
+  --velox-ink-faint: #6E5F56;
+  --velox-accent: #D97757;
+  --velox-accent-soft: #F0A080;
+}
+
+/* Antigravity sessions: deep navy chrome. */
+[data-agent-theme="agy"] {
+  --velox-canvas: #0B0E17;
+  --velox-surface: #10152A;
+  --velox-elevated: #171E36;
+  --velox-hover: #1D2642;
+  --velox-active: #243055;
+  --velox-ink: #E8EDF8;
+  --velox-ink-secondary: #A3AEC8;
+  --velox-ink-muted: #6B7794;
+  --velox-ink-soft: #8490AC;
+  --velox-ink-faint: #52607A;
+  --velox-accent: #4285F4;
+  --velox-accent-soft: #9ED0FF;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background-color: var(--velox-canvas);
+  color: var(--velox-ink);
+  font-family: "Inter", "Segoe UI Variable", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-mono,
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Slim unobtrusive scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(152, 162, 184, 0.18);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(152, 162, 184, 0.34);
+}
+
+/* Seamless xterm.js canvas integration */
+.xterm {
+  height: 100%;
+  width: 100%;
+  padding: 8px 10px 6px 12px;
+  background-color: var(--velox-term-bg, #0B0D12) !important;
+}
+
+.xterm-viewport {
+  background-color: var(--velox-term-bg, #0B0D12) !important;
+  overflow-y: auto !important;
+}
+
+.xterm-screen {
+  width: 100% !important;
+}
+
+/* ---- Animated wallpaper behind the sidebar ------------------------------------------- */
+
+/* ThemeBackground marks the row (sidebar + main) and <main> while a scene is running: the
+ * scene then covers the whole row, so clouds and stars also drift behind the sidebar. */
+[data-velox-scene] {
+  position: relative;
+}
+
+main[data-velox-scene-main] {
+  position: static;
+  background-color: transparent;
+}
+
+/* Above the scene and the terminal pane (its shadow falls on the terminal's left padding,
+ * and the row context menu, which lives inside it, must not slip under the terminal). */
+.velox-sidebar {
+  position: relative;
+  z-index: 20;
+  background-color: var(--velox-surface);
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+/* Over the scene: tinted glass (no blur: it would smear the tiny stars and re-filter the
+ * wallpaper on every frame), a crisp divider with a soft accent glint, and a shadow that
+ * lifts the panel off the terminal area. */
+[data-velox-scene] > .velox-sidebar {
+  background-color: transparent;
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--velox-surface) 44%, transparent) 0%,
+    color-mix(in srgb, var(--velox-surface) 54%, transparent) 70%,
+    color-mix(in srgb, var(--velox-surface) 72%, transparent) 100%
+  );
+  border-right-color: rgba(255, 255, 255, 0.11);
+  box-shadow:
+    1px 0 0 rgba(0, 0, 0, 0.4),
+    12px 0 28px -14px rgba(0, 0, 0, 0.75);
+}
+
+[data-velox-scene] > .velox-sidebar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 1px;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    color-mix(in srgb, var(--velox-accent) 55%, transparent) 22%,
+    color-mix(in srgb, var(--velox-accent-soft) 30%, transparent) 60%,
+    transparent 100%
+  );
+}
+
+/* Rows become glass too, so the sky still shows through a selected session. */
+[data-velox-scene] .velox-row-active {
+  background-color: color-mix(in srgb, var(--velox-active) 70%, transparent);
+}
+
+[data-velox-scene] .velox-row:hover {
+  background-color: color-mix(in srgb, var(--velox-elevated) 62%, transparent);
+}
+
+/* ---- The crew at the foot of the sidebar --------------------------------------------- */
+
+.velox-crew::before {
+  /* The ground they stand on. */
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 7px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.12), transparent);
+}
+
+.velox-crew-critter {
+  position: relative;
+  display: flex;
+  cursor: default;
+  transform-origin: 50% 100%;
+}
+
+.velox-crew-critter[data-act="hop"],
+.velox-crew-critter:hover {
+  animation: velox-crew-hop 560ms cubic-bezier(0.3, 0.7, 0.4, 1);
+}
+
+.velox-crew-eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.velox-crew-critter[data-act="blink"] .velox-crew-eyes {
+  animation: velox-crew-blink 220ms ease-in-out;
+}
+
+@keyframes velox-crew-hop {
+  0% {
+    transform: translateY(0) scale(1, 1);
+  }
+  18% {
+    transform: translateY(0) scale(1.1, 0.88);
+  }
+  45% {
+    transform: translateY(-6px) scale(0.94, 1.07);
+  }
+  72% {
+    transform: translateY(0) scale(1.07, 0.93);
+  }
+  100% {
+    transform: translateY(0) scale(1, 1);
+  }
+}
+
+@keyframes velox-crew-blink {
+  0%,
+  100% {
+    transform: scaleY(1);
+  }
+  50% {
+    transform: scaleY(0.15);
+  }
+}
+
+@keyframes velox-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-velox-slide-in {
+  animation: velox-slide-in 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes velox-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-velox-pop-in {
+  animation: velox-pop-in 130ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-velox-slide-in,
+  .animate-velox-pop-in {
+    animation: none;
+  }
+}
