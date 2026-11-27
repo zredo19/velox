@@ -2,10 +2,14 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { X } from "lucide-react";
 import { partitionSessions, useSessions } from "./hooks/useSessions";
 import { useSystemTelemetry } from "./hooks/useSystemTelemetry";
+import { useTeam } from "./hooks/useTeam";
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
 import { TerminalPane } from "./components/TerminalPane";
 import { EmptyState } from "./components/EmptyState";
+import { RemoteTerminalPane } from "./components/team/RemoteTerminalPane";
+import { TaskInbox } from "./components/team/TaskInbox";
+import type { SelectedRemoteTarget } from "./components/team/TeamSidebarSection";
 import { ThemeBackground } from "./themes/ThemeBackground";
 import {
   getAgentTheme,
@@ -15,7 +19,7 @@ import {
 } from "./themes/registry";
 import type { ThemePreference } from "./themes/types";
 import type { AgentActivity } from "./lib/agentActivity";
-import type { AgentKind, SessionRecord } from "./types/ipc";
+import type { AgentKind, SessionRecord, VeloxConfig } from "./types/ipc";
 
 // Lazily code-split overlay modals & drawers to keep initial startup bundle lean
 const AgentLauncherModal = lazy(() =>
@@ -64,6 +68,17 @@ export function App() {
   const { telemetry, mcp, sleepMcpBackend, sleepAllMcps } =
     useSystemTelemetry();
 
+  const {
+    team,
+    tasks,
+    pendingIncoming,
+    error: teamError,
+    setShared,
+    sendTask,
+    respond,
+    refresh: refreshTeam,
+  } = useTeam();
+
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [launcherKind, setLauncherKind] = useState<AgentKind | null>(null);
@@ -77,6 +92,8 @@ export function App() {
   );
   const [clearTrigger, setClearTrigger] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
+  const [selectedRemote, setSelectedRemote] =
+    useState<SelectedRemoteTarget | null>(null);
   const [activity, setActivity] = useState<Record<string, AgentActivity | null>>({});
   const toastTimerRef = useRef<number | undefined>(undefined);
 
@@ -94,6 +111,21 @@ export function App() {
     setActivity((prev) => (prev[id] === next ? prev : { ...prev, [id]: next }));
   }, []);
 
+  const selectedPeerObj = selectedRemote
+    ? (team?.peers.find((p) => p.name === selectedRemote.peer) ?? null)
+    : null;
+  const selectedRemoteSession =
+    selectedRemote && selectedPeerObj
+      ? (selectedPeerObj.sessions.find((s) => s.id === selectedRemote.sessionId) ??
+        null)
+      : null;
+  const remoteSessionMissing =
+    selectedRemote !== null &&
+    team !== null &&
+    (!team.enabled ||
+      !selectedPeerObj ||
+      (selectedPeerObj.online && !selectedRemoteSession));
+
   const defaultCwd = config?.defaultCwd ?? "";
   const fontFamily =
     config?.fontFamily ??
@@ -101,8 +133,12 @@ export function App() {
   const fontSize = config?.fontSize ?? DEFAULT_FONT_SIZE;
   const animated = config?.animatedBackgrounds ?? true;
   const activeTheme = getAgentTheme(
-    activeSession ? (activeSession.activeAgent ?? activeSession.agentKind) : undefined,
-    animated,
+    selectedRemote
+      ? (selectedRemoteSession?.activeAgent ?? selectedRemoteSession?.agentKind)
+      : activeSession
+        ? (activeSession.activeAgent ?? activeSession.agentKind)
+        : undefined,
+    animated && !selectedRemote,
     themePreference,
   );
 
@@ -123,9 +159,12 @@ export function App() {
     return { blockedCount: blocked, workingCount: working };
   }, [sessions, activity]);
 
-  // One shared canvas, only while an awake terminal is on screen.
+  // One shared canvas, only while an awake local terminal is on screen.
   const showBackground =
-    !loading && !!activeSession && activeSession.status !== "sleeping";
+    !loading &&
+    !selectedRemote &&
+    !!activeSession &&
+    activeSession.status !== "sleeping";
 
   const openLauncher = useCallback((kind: AgentKind | null = null) => {
     setLauncherKind(kind);
@@ -164,6 +203,7 @@ export function App() {
   const handleLaunch = useCallback(
     (presetId: string, cwd: string, title?: string) => {
       closeLauncher();
+      setSelectedRemote(null);
       void createSession(presetId, cwd, title);
     },
     [closeLauncher, createSession],
@@ -173,20 +213,6 @@ export function App() {
   const handlePaneWake = useCallback(
     (id: string, cols: number, rows: number) => {
       void wakeSession(id, cols, rows);
-    },
-    [wakeSession],
-  );
-
-  const handleSelectSession = useCallback(
-    (id: string) => {
-      void selectSession(id);
-    },
-    [selectSession],
-  );
-
-  const handleWakeSession = useCallback(
-    (id: string) => {
-      void wakeSession(id);
     },
     [wakeSession],
   );
@@ -221,6 +247,7 @@ export function App() {
 
   const handleDuplicateSession = useCallback(
     (session: SessionRecord) => {
+      setSelectedRemote(null);
       void createSession(session.presetId, session.cwd, `${session.title} (2)`);
       showToast(`Duplicated ${session.title}`);
     },
@@ -243,6 +270,7 @@ export function App() {
 
   const handleQuickLaunch = useCallback(
     (presetId: string) => {
+      setSelectedRemote(null);
       void createSession(presetId, defaultCwd || undefined);
     },
     [createSession, defaultCwd],
@@ -294,12 +322,42 @@ export function App() {
   }, []);
 
   const handleSleepActive = useCallback(() => {
-    if (activeSessionId) {
+    if (activeSessionId && !selectedRemote) {
       void sleepSession(activeSessionId);
       showToast("Session hibernated · 0 MB RAM");
     }
-  }, [activeSessionId, sleepSession, showToast]);
+  }, [activeSessionId, selectedRemote, sleepSession, showToast]);
 
+  const handleSelectLocalSession = useCallback(
+    (id: string) => {
+      setSelectedRemote(null);
+      void selectSession(id);
+    },
+    [selectSession],
+  );
+
+  const handleWakeLocalSession = useCallback(
+    (id: string) => {
+      setSelectedRemote(null);
+      void wakeSession(id);
+    },
+    [wakeSession],
+  );
+
+  const handleToggleShare = useCallback(
+    (id: string, shared: boolean) => {
+      void setShared(id, shared);
+    },
+    [setShared],
+  );
+
+  const handleSaveConfig = useCallback(
+    async (next: VeloxConfig) => {
+      await updateConfig(next);
+      void refreshTeam();
+    },
+    [updateConfig, refreshTeam],
+  );
   // Global keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -323,7 +381,7 @@ export function App() {
         else if (key === "m") run(() => setMcpDrawerOpen((v) => !v));
         else if (key === "p") run(() => setPaletteOpen((v) => !v));
         else if (key === "t") run(() => setThemesOpen((v) => !v));
-        else if (key === "h" && activeSessionId) run(handleSleepActive);
+        else if (key === "h" && activeSessionId && !selectedRemote) run(handleSleepActive);
         return;
       }
 
@@ -336,11 +394,16 @@ export function App() {
       else if (key === "-") run(handleZoomOut);
       else if (key === "0") run(handleZoomReset);
       // Ctrl+W deletes a word inside the terminal, so it only closes from outside it.
-      else if (key === "w" && activeSessionId && !inTerminal) {
+      else if (key === "w" && activeSessionId && !selectedRemote && !inTerminal) {
         run(() => void closeSession(activeSessionId));
       } else if (/^[1-9]$/.test(key)) {
         const target = visibleSessions[Number(key) - 1];
-        if (target) run(() => void selectSession(target.id));
+        if (target) {
+          run(() => {
+            setSelectedRemote(null);
+            void selectSession(target.id);
+          });
+        }
       }
     };
 
@@ -349,6 +412,7 @@ export function App() {
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [
     activeSessionId,
+    selectedRemote,
     visibleSessions,
     selectSession,
     closeSession,
@@ -357,6 +421,8 @@ export function App() {
     handleZoomOut,
     handleZoomReset,
   ]);
+
+  const bannerError = error ?? teamError;
 
   return (
     <div
@@ -371,7 +437,7 @@ export function App() {
         onOpenThemes={handleOpenThemes}
         onOpenShortcuts={handleOpenShortcuts}
         onCopyPath={handleCopyPath}
-        activeSession={activeSession}
+        activeSession={selectedRemote ? null : activeSession}
         blockedCount={blockedCount}
         workingCount={workingCount}
         telemetry={telemetry}
@@ -379,19 +445,24 @@ export function App() {
         mcpDrawerOpen={mcpDrawerOpen}
         onToggleMcpDrawer={handleToggleMcpDrawer}
         onOpenSettings={handleOpenSettings}
+        team={team}
+        tasks={tasks}
+        pendingIncomingCount={pendingIncoming.length}
       />
 
-      {error && (
+      {bannerError && (
         <div className="px-4 py-1.5 bg-rose-500/12 border-b border-rose-500/25 text-[12px] text-rose-300 flex items-center justify-between gap-3 animate-velox-toast-in">
-          <span className="truncate">{error}</span>
-          <button
-            type="button"
-            onClick={clearError}
-            aria-label="Dismiss error"
-            className="shrink-0 p-0.5 rounded hover:bg-rose-500/20 text-rose-300 transition-colors cursor-pointer"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
+          <span className="truncate">{bannerError}</span>
+          {error && (
+            <button
+              type="button"
+              onClick={clearError}
+              aria-label="Dismiss error"
+              className="shrink-0 p-0.5 rounded hover:bg-rose-500/20 text-rose-300 transition-colors cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       )}
 
@@ -408,9 +479,13 @@ export function App() {
           <Sidebar
             sessions={sessions}
             activity={activity}
-            activeSessionId={activeSessionId}
-            onSelectSession={handleSelectSession}
-            onWakeSession={handleWakeSession}
+            activeSessionId={selectedRemote ? null : activeSessionId}
+            team={team}
+            selectedRemote={selectedRemote}
+            onSelectSession={handleSelectLocalSession}
+            onSelectRemote={setSelectedRemote}
+            onToggleShare={handleToggleShare}
+            onWakeSession={handleWakeLocalSession}
             onSleepSession={handleSleepSession}
             onCloseSession={handleCloseSession}
             onRenameSession={handleRenameSession}
@@ -420,6 +495,7 @@ export function App() {
             onSleepIdleSessions={handleSleepIdleSessions}
             onOpenLauncher={handleOpenDefaultLauncher}
             onLaunchAgentKind={handleLaunchAgentKind}
+            onOpenSettings={handleOpenSettings}
           />
         </div>
 
@@ -430,32 +506,70 @@ export function App() {
               <div className="w-5 h-5 rounded-full border-2 border-[var(--velox-accent)]/30 border-t-[var(--velox-accent)] animate-spin" />
               <span>Loading workspace…</span>
             </div>
-          ) : sessions.length === 0 ? (
-            <EmptyState
-              presets={presets}
-              defaultCwd={defaultCwd}
-              onQuickLaunch={handleQuickLaunch}
-              onOpenLauncher={handleOpenDefaultLauncher}
-              onOpenPalette={handleOpenPalette}
-            />
           ) : (
-            sessions.map((session) => (
-              <TerminalPane
-                key={session.id}
-                session={session}
-                isActive={activeSessionId === session.id}
-                fontFamily={fontFamily}
-                fontSize={fontSize}
-                theme={getAgentTheme(
-                  session.activeAgent ?? session.agentKind,
-                  animated,
-                  themePreference,
-                )}
-                clearTrigger={clearTrigger}
-                onActivity={reportActivity}
-                onWake={handlePaneWake}
-              />
-            ))
+            <>
+              {sessions.length === 0 && !selectedRemote && (
+                <EmptyState
+                  presets={presets}
+                  defaultCwd={defaultCwd}
+                  onQuickLaunch={handleQuickLaunch}
+                  onOpenLauncher={handleOpenDefaultLauncher}
+                  onOpenPalette={handleOpenPalette}
+                />
+              )}
+
+              {sessions.map((session) => (
+                <TerminalPane
+                  key={session.id}
+                  session={session}
+                  isActive={!selectedRemote && activeSessionId === session.id}
+                  fontFamily={fontFamily}
+                  fontSize={fontSize}
+                  theme={getAgentTheme(
+                    session.activeAgent ?? session.agentKind,
+                    animated,
+                    themePreference,
+                  )}
+                  clearTrigger={clearTrigger}
+                  onActivity={reportActivity}
+                  onWake={handlePaneWake}
+                />
+              ))}
+
+              {selectedRemote &&
+                (remoteSessionMissing ? (
+                  <div className="relative z-10 h-full w-full bg-[var(--velox-canvas)] flex items-center justify-center p-6">
+                    <div className="w-full max-w-[360px] rounded-xl bg-[var(--velox-elevated)] border border-white/[0.08] p-6 text-center shadow-xl space-y-3">
+                      <div className="text-[14px] font-medium text-[var(--velox-ink)]">
+                        Session no longer shared
+                      </div>
+                      <p className="text-[12px] text-[var(--velox-ink-muted)]">
+                        This remote session is no longer available from{" "}
+                        {selectedRemote.peer}.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedRemote(null)}
+                        className="h-8 px-4 rounded-lg bg-[var(--velox-accent)] hover:brightness-110 text-[#080B12] text-[12px] font-semibold cursor-pointer"
+                      >
+                        Go back
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <RemoteTerminalPane
+                    peer={selectedRemote.peer}
+                    sessionId={selectedRemote.sessionId}
+                    remoteSession={selectedRemoteSession}
+                    peerOnline={selectedPeerObj?.online ?? true}
+                    tasks={tasks}
+                    fontFamily={fontFamily}
+                    fontSize={fontSize}
+                    onSendTask={sendTask}
+                    onBack={() => setSelectedRemote(null)}
+                  />
+                ))}
+            </>
           )}
         </main>
       </div>
@@ -501,9 +615,10 @@ export function App() {
             open={settingsOpen}
             onClose={handleCloseSettings}
             config={config}
+            team={team}
             themePreference={themePreference}
             onSelectTheme={handleSelectTheme}
-            onSave={updateConfig}
+            onSave={handleSaveConfig}
           />
         )}
 
@@ -513,10 +628,10 @@ export function App() {
             onClose={handleClosePalette}
             sessions={sessions}
             presets={presets}
-            activeSession={activeSession}
+            activeSession={selectedRemote ? null : activeSession}
             animatedBackgrounds={animated}
             themePreference={themePreference}
-            onSelectSession={handleSelectSession}
+            onSelectSession={handleSelectLocalSession}
             onQuickLaunch={handleQuickLaunch}
             onOpenLauncher={handleOpenDefaultLauncher}
             onOpenThemes={handleOpenThemes}
@@ -550,6 +665,8 @@ export function App() {
           <ShortcutsModal open={shortcutsOpen} onClose={handleCloseShortcuts} />
         )}
       </Suspense>
+
+      <TaskInbox pendingIncoming={pendingIncoming} onRespond={respond} />
     </div>
   );
 }

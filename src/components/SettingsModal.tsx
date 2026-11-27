@@ -3,12 +3,18 @@ import { Check, FolderOpen, Palette, Settings, X } from "lucide-react";
 import { veloxApi } from "../lib/tauri";
 import { THEME_OPTIONS } from "../themes/registry";
 import type { ThemePreference } from "../themes/types";
-import type { VeloxConfig } from "../types/ipc";
+import type { TeamSnapshot, VeloxConfig } from "../types/ipc";
+import {
+  DEFAULT_TEAM_CONFIG,
+  TeamSettingsSection,
+  validateTeamConfig,
+} from "./team/TeamSettingsSection";
 
 export interface SettingsModalProps {
   open: boolean;
   onClose: () => void;
   config: VeloxConfig | null;
+  team?: TeamSnapshot | null;
   themePreference: ThemePreference;
   onSelectTheme: (pref: ThemePreference) => void;
   onSave: (next: VeloxConfig) => Promise<void>;
@@ -74,16 +80,27 @@ export function SettingsModal({
   open,
   onClose,
   config,
+  team = null,
   themePreference,
   onSelectTheme,
   onSave,
 }: SettingsModalProps) {
   const [draft, setDraft] = useState<VeloxConfig | null>(config);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     if (open && config) {
-      setDraft({ ...config });
+      setDraft({
+        ...config,
+        team: config.team
+          ? {
+              ...config.team,
+              peers: config.team.peers.map((p) => ({ ...p })),
+            }
+          : { ...DEFAULT_TEAM_CONFIG, peers: [] },
+      });
+      setSaveError(null);
     }
   }, [open, config]);
 
@@ -91,12 +108,36 @@ export function SettingsModal({
     draft && config && JSON.stringify(draft) !== JSON.stringify(config),
   );
 
+  const teamDraft = draft?.team ?? DEFAULT_TEAM_CONFIG;
+  const teamValidation = validateTeamConfig(teamDraft);
+
   const handleSave = async () => {
     if (!draft) return;
+    if (!teamValidation.valid) {
+      setSaveError(teamValidation.summaryError);
+      return;
+    }
     setSaving(true);
+    setSaveError(null);
     try {
-      await onSave(draft);
+      const normalizedTeam = {
+        ...teamDraft,
+        displayName: teamDraft.displayName.trim(),
+        bindHost: teamDraft.bindHost.trim(),
+        peers: teamDraft.peers.map((p) => ({
+          ...p,
+          name: p.name.trim(),
+          host: p.host.trim(),
+        })),
+      };
+      await onSave({ ...draft, team: normalizedTeam });
       onClose();
+    } catch (err) {
+      setSaveError(
+        err instanceof Error && err.message
+          ? err.message
+          : "Failed to save settings",
+      );
     } finally {
       setSaving(false);
     }
@@ -493,14 +534,31 @@ export function SettingsModal({
               </div>
             </div>
           </section>
+
+          {/* Section 4: Team (Velox Online) */}
+          <TeamSettingsSection
+            value={teamDraft}
+            teamStatus={team}
+            validation={teamValidation}
+            onChange={(nextTeam) => {
+              setSaveError(null);
+              setDraft({ ...draft, team: nextTeam });
+            }}
+          />
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 bg-[var(--velox-canvas)]/60 border-t border-white/[0.07] flex items-center justify-between gap-2">
-          <span className="text-[11px] text-[var(--velox-ink-muted)] hidden sm:inline">
-            Tip: Press <span className="velox-kbd">Ctrl+S</span> to save
-          </span>
-          <div className="flex items-center gap-2 ml-auto">
+        <div className="px-5 py-3 bg-[var(--velox-canvas)]/60 border-t border-white/[0.07] flex items-center justify-between gap-3">
+          {saveError || !teamValidation.valid ? (
+            <div className="min-w-0 text-[11.5px] text-rose-300 truncate">
+              {saveError ?? teamValidation.summaryError}
+            </div>
+          ) : (
+            <span className="text-[11px] text-[var(--velox-ink-muted)] hidden sm:inline">
+              Tip: Press <span className="velox-kbd">Ctrl+S</span> to save
+            </span>
+          )}
+          <div className="flex items-center gap-2 shrink-0 ml-auto">
             <button
               type="button"
               onClick={onClose}
@@ -510,7 +568,7 @@ export function SettingsModal({
             </button>
             <button
               type="button"
-              disabled={saving}
+              disabled={saving || !teamValidation.valid}
               onClick={() => void handleSave()}
               className="h-8 px-4 rounded-lg bg-[var(--velox-accent)] hover:brightness-110 active:scale-[0.98] text-[#080B12] text-[12.5px] font-semibold transition-all cursor-pointer disabled:opacity-50"
             >
