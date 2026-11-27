@@ -87,7 +87,7 @@ fn normalize_path(p: &str) -> String {
 }
 
 /// Claude config dirs that may hold transcripts for a given Velox profile.
-fn claude_config_bases(profile: Option<&str>) -> Vec<PathBuf> {
+pub fn claude_config_bases(profile: Option<&str>) -> Vec<PathBuf> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
@@ -151,7 +151,7 @@ fn claude_transcript_has_messages(path: &Path) -> bool {
 }
 
 /// Locate the transcript file for a Claude session ID in any project dir of the profile.
-fn find_claude_transcript(profile: Option<&str>, session_id: &str) -> Option<PathBuf> {
+pub fn find_claude_transcript(profile: Option<&str>, session_id: &str) -> Option<PathBuf> {
     let file_name = format!("{session_id}.jsonl");
     for base in claude_config_bases(profile) {
         let Ok(entries) = std::fs::read_dir(base.join("projects")) else {
