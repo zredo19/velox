@@ -1,14 +1,18 @@
 //! `TeamHub`: central Velox Online state (config, local shared sessions, peers, tasks) and the
 //! `TeamApi` implementation.
 
+use crate::domain::agent::AgentKind;
 use crate::domain::config::{PeerConfig, TeamConfig};
 use crate::domain::error::{VeloxError, VeloxResult};
 use crate::domain::session::{SessionRecord, SessionStatus};
 use crate::pty::manager::StreamPos;
+use crate::session::detector::{detect_screen_activity, is_agent_ready_for_input, AgentActivity};
 use crate::session::manager::{SessionManager, SessionTap};
 use crate::team::api::{
-    BoxFuture, LocalSessionInfo, PeerStatus, SendTaskRequest, SessionTarget, TaskDirection,
-    TaskTicket, TeamApi, TeamSnapshot, EVT_TEAM_TASKS_UPDATED, EVT_TEAM_UPDATED,
+    resolve_session_by_query, BoxFuture, LocalMessageEvent, LocalMessageReceipt,
+    LocalMessageStatus, LocalSessionInfo, PeerStatus, SendLocalMessageRequest, SendTaskRequest,
+    SessionTarget, TaskDirection, TaskTicket, TeamApi, TeamSnapshot, EVT_TEAM_LOCAL_MESSAGE,
+    EVT_TEAM_TASKS_UPDATED, EVT_TEAM_UPDATED,
 };
 use crate::team::client::PeerClient;
 use crate::team::delivery::{build_task_input, CHUNK_DELAY_MS};
@@ -26,8 +30,8 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot};
@@ -45,6 +49,9 @@ const MAX_TICKETS_RETAINED: usize = 200;
 const MAX_TICKETS_RETURNED: usize = 50;
 const MAX_READ_SCROLLBACK_BYTES: usize = 512 * 1024;
 const VT100_SCROLLBACK_LINES: usize = 2000;
+const LOCAL_QUEUE_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const LOCAL_QUEUE_TIMEOUT: Duration = Duration::from_secs(120);
+const LOCAL_SEND_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Minimal session backend interface so `TeamHub` can run against either `SessionManager` or a fake.
 pub trait LocalSessions: Send + Sync {
@@ -53,6 +60,12 @@ pub trait LocalSessions: Send + Sync {
     fn get_scrollback_with_pos(&self, session_id: &str) -> (Vec<u8>, StreamPos);
     fn write_pty_bytes(&self, session_id: &str, data: &[u8]) -> VeloxResult<()>;
     fn is_pty_alive(&self, session_id: &str) -> bool;
+    fn wake_session(
+        &self,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> VeloxResult<SessionRecord>;
 }
 
 impl LocalSessions for SessionManager {
@@ -74,6 +87,15 @@ impl LocalSessions for SessionManager {
 
     fn is_pty_alive(&self, session_id: &str) -> bool {
         SessionManager::is_pty_alive(self, session_id)
+    }
+
+    fn wake_session(
+        &self,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> VeloxResult<SessionRecord> {
+        SessionManager::wake_session_headless(self, session_id, cols, rows)
     }
 }
 
@@ -155,8 +177,35 @@ struct LifecycleHandles {
     tick_task: Option<JoinHandle<()>>,
 }
 
+struct QueuedLocalMessage {
+    message_id: String,
+    from_session_id: Option<String>,
+    from_title: String,
+    to_session_id: String,
+    to_title: String,
+    payload: String,
+    preview: String,
+    woke_up: bool,
+    waiting_after_wake: bool,
+    enqueued_at: Instant,
+    done_tx: Option<oneshot::Sender<Result<(), String>>>,
+}
+
+#[derive(Default)]
+struct TargetLocalQueue {
+    pending: VecDeque<QueuedLocalMessage>,
+    worker_running: bool,
+}
+
+enum TargetReadiness {
+    Ready,
+    Wait(String),
+    Gone(String),
+}
+
 /// Central Velox Online coordinator.
 pub struct TeamHub {
+    self_weak: Weak<Self>,
     sessions: Arc<dyn LocalSessions>,
     event_sink: RwLock<Option<Arc<dyn EventSink>>>,
     config: RwLock<TeamConfig>,
@@ -171,6 +220,8 @@ pub struct TeamHub {
     next_ticket_seq: AtomicU64,
     summary_cache: Mutex<HashMap<String, SummaryCacheEntry>>,
     last_emitted_snapshot: Mutex<Value>,
+    local_queues: Mutex<HashMap<String, TargetLocalQueue>>,
+    shutting_down: AtomicBool,
     lifecycle: tokio::sync::Mutex<LifecycleHandles>,
 }
 
@@ -184,7 +235,8 @@ impl TeamHub {
         event_sink: Option<Arc<dyn EventSink>>,
         config: TeamConfig,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new_cyclic(|self_weak| Self {
+            self_weak: self_weak.clone(),
             sessions,
             event_sink: RwLock::new(event_sink),
             config: RwLock::new(config),
@@ -199,6 +251,8 @@ impl TeamHub {
             next_ticket_seq: AtomicU64::new(1),
             summary_cache: Mutex::new(HashMap::new()),
             last_emitted_snapshot: Mutex::new(Value::Null),
+            local_queues: Mutex::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
             lifecycle: tokio::sync::Mutex::new(LifecycleHandles {
                 server: None,
                 peers: Vec::new(),
@@ -255,6 +309,17 @@ impl TeamHub {
     }
 
     pub async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        {
+            let mut queues = self.local_queues.lock().unwrap_or_else(|e| e.into_inner());
+            for (_, mut q) in queues.drain() {
+                for mut item in q.pending.drain(..) {
+                    if let Some(tx) = item.done_tx.take() {
+                        let _ = tx.send(Err("Velox is shutting down".to_string()));
+                    }
+                }
+            }
+        }
         let (server, peers, tick_tx, tick_task) = {
             let mut lc = self.lifecycle.lock().await;
             (
@@ -384,17 +449,10 @@ impl TeamHub {
         self.notify_requester(requester_conn_id, request_id, TaskState::Accepted, None);
         self.emit_tasks_updated();
 
-        let chunks = build_task_input(kind, &text);
-        let mut delivery_error: Option<String> = None;
-        for (i, chunk) in chunks.iter().enumerate() {
-            if i > 0 {
-                tokio::time::sleep(Duration::from_millis(CHUNK_DELAY_MS)).await;
-            }
-            if let Err(err) = self.sessions.write_pty_bytes(&session_id, chunk) {
-                delivery_error = Some(err.to_string());
-                break;
-            }
-        }
+        let delivery_error = self
+            .write_prompt_to_pty(&session_id, kind, &text)
+            .await
+            .err();
 
         let (final_state, final_msg) = match delivery_error {
             None => (TaskState::Delivered, None),
@@ -1321,6 +1379,499 @@ impl TeamHub {
             .into_iter()
             .any(|s| s.id == session_id && is_live_status(s.status) && s.shared)
     }
+
+    fn session_info_from_record(
+        &self,
+        s: SessionRecord,
+        summary: Option<String>,
+    ) -> LocalSessionInfo {
+        let (cols, rows) = self
+            .sessions
+            .pty_size(&s.id)
+            .unwrap_or((DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS));
+        LocalSessionInfo {
+            info: RemoteSessionInfo {
+                id: s.id,
+                title: s.title,
+                agent_kind: s.agent_kind,
+                active_agent: s.active_agent,
+                status: s.status,
+                folder: cwd_basename(&s.cwd),
+                last_active_at: s.last_active_at,
+                summary,
+                cols,
+                rows,
+            },
+            shared: s.shared,
+        }
+    }
+
+    async fn write_prompt_to_pty(
+        &self,
+        session_id: &str,
+        kind: AgentKind,
+        text: &str,
+    ) -> Result<(), String> {
+        let chunks = build_task_input(kind, text);
+        for (i, chunk) in chunks.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(Duration::from_millis(CHUNK_DELAY_MS)).await;
+            }
+            if let Err(err) = self.sessions.write_pty_bytes(session_id, chunk) {
+                return Err(err.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_local_message(
+        &self,
+        id: &str,
+        from_session_id: Option<&str>,
+        from_title: &str,
+        to_session_id: &str,
+        to_title: &str,
+        status: LocalMessageStatus,
+        woke_up: bool,
+        preview: &str,
+    ) {
+        self.emit_event(
+            EVT_TEAM_LOCAL_MESSAGE,
+            &LocalMessageEvent {
+                id: id.to_string(),
+                from_session_id: from_session_id.map(str::to_string),
+                from_title: from_title.to_string(),
+                to_session_id: to_session_id.to_string(),
+                to_title: to_title.to_string(),
+                status,
+                woke_up,
+                preview: preview.to_string(),
+                timestamp: Utc::now().to_rfc3339(),
+            },
+        );
+    }
+
+    fn resolve_local_sender(
+        &self,
+        all_sessions: &[SessionRecord],
+        candidates: &[SessionRecord],
+        from_session_id: Option<&str>,
+        from_session_query: Option<&str>,
+    ) -> (Option<String>, String) {
+        if let Some(raw_id) = from_session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(found) = all_sessions.iter().find(|s| s.id.eq_ignore_ascii_case(raw_id)) {
+                return (Some(found.id.clone()), found.title.clone());
+            }
+            let title = from_session_query
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| short_session_id(raw_id));
+            return (Some(raw_id.to_string()), title);
+        }
+
+        if let Some(q) = from_session_query.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Ok(found) =
+                resolve_session_by_query(candidates, q, "this machine", |s| &s.id, |s| &s.title)
+            {
+                return (Some(found.id.clone()), found.title.clone());
+            }
+            return (None, q.to_string());
+        }
+
+        (None, self.display_name())
+    }
+
+    fn check_local_target_readiness(
+        &self,
+        session: &SessionRecord,
+        waiting_after_wake: bool,
+    ) -> TargetReadiness {
+        match session.status {
+            SessionStatus::Exited => return TargetReadiness::Gone("Target session exited".to_string()),
+            SessionStatus::Sleeping => {
+                return TargetReadiness::Gone("Target session went back to sleep".to_string());
+            }
+            SessionStatus::Starting => {
+                return TargetReadiness::Wait("Target session is still starting".to_string());
+            }
+            SessionStatus::Running | SessionStatus::Idle | SessionStatus::Blocked => {}
+        }
+
+        if !self.sessions.is_pty_alive(&session.id) {
+            return TargetReadiness::Wait("Target PTY is not alive yet".to_string());
+        }
+
+        let (raw, _) = self.sessions.get_scrollback_with_pos(&session.id);
+        let (cols, rows) = self
+            .sessions
+            .pty_size(&session.id)
+            .unwrap_or((DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS));
+        let kind = session.active_agent.unwrap_or(session.agent_kind);
+
+        if raw.is_empty() {
+            if waiting_after_wake {
+                return TargetReadiness::Wait("Waiting for woken agent prompt".to_string());
+            }
+            if session.status == SessionStatus::Blocked {
+                return TargetReadiness::Wait(
+                    "Target session is waiting on user confirmation".to_string(),
+                );
+            }
+            return TargetReadiness::Ready;
+        }
+
+        let activity = detect_screen_activity(kind, &raw, cols, rows);
+        if activity == Some(AgentActivity::Blocked) {
+            return TargetReadiness::Wait(
+                "Target session is blocked on a confirmation prompt".to_string(),
+            );
+        }
+
+        if waiting_after_wake {
+            if is_agent_ready_for_input(kind, &raw, cols, rows) {
+                return TargetReadiness::Ready;
+            }
+            return TargetReadiness::Wait("Waiting for woken agent prompt".to_string());
+        }
+
+        if kind == AgentKind::Claude && activity.is_none() {
+            return TargetReadiness::Wait("Waiting for Claude prompt".to_string());
+        }
+
+        if session.status == SessionStatus::Blocked && activity != Some(AgentActivity::Idle) {
+            return TargetReadiness::Wait(
+                "Target session is waiting on user confirmation".to_string(),
+            );
+        }
+
+        TargetReadiness::Ready
+    }
+
+    fn spawn_local_queue_worker(&self, target_id: &str) -> bool {
+        let Some(hub) = self.self_weak.upgrade() else {
+            return false;
+        };
+        let target = target_id.to_string();
+        spawn_on_runtime(async move {
+            hub.drain_local_queue(target).await;
+        });
+        true
+    }
+
+    async fn drain_local_queue(self: Arc<Self>, target_id: String) {
+        loop {
+            if self.shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
+
+            let front_meta = {
+                let mut queues = self.local_queues.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(q) = queues.get_mut(&target_id) else {
+                    return;
+                };
+                if let Some(front) = q.pending.front() {
+                    Some((
+                        front.message_id.clone(),
+                        front.from_session_id.clone(),
+                        front.from_title.clone(),
+                        front.to_session_id.clone(),
+                        front.to_title.clone(),
+                        front.payload.clone(),
+                        front.preview.clone(),
+                        front.woke_up,
+                        front.waiting_after_wake,
+                        front.enqueued_at,
+                    ))
+                } else {
+                    q.worker_running = false;
+                    queues.remove(&target_id);
+                    return;
+                }
+            };
+
+            let Some((
+                message_id,
+                from_session_id,
+                from_title,
+                to_session_id,
+                to_title,
+                payload,
+                preview,
+                woke_up,
+                waiting_after_wake,
+                enqueued_at,
+            )) = front_meta
+            else {
+                return;
+            };
+
+            let session = self
+                .sessions
+                .list_sessions()
+                .into_iter()
+                .find(|s| s.id == target_id);
+
+            let outcome: Option<Result<(), String>> = match session {
+                None => Some(Err("Target session no longer exists".to_string())),
+                Some(s) => match self.check_local_target_readiness(&s, waiting_after_wake) {
+                    TargetReadiness::Ready => {
+                        let kind = s.active_agent.unwrap_or(s.agent_kind);
+                        Some(self.write_prompt_to_pty(&target_id, kind, &payload).await)
+                    }
+                    TargetReadiness::Gone(reason) => Some(Err(reason)),
+                    TargetReadiness::Wait(reason) => {
+                        if enqueued_at.elapsed() >= LOCAL_QUEUE_TIMEOUT {
+                            Some(Err(format!(
+                                "Timed out waiting for \"{to_title}\": {reason}"
+                            )))
+                        } else {
+                            None
+                        }
+                    }
+                },
+            };
+
+            match outcome {
+                None => {
+                    tokio::time::sleep(LOCAL_QUEUE_POLL_INTERVAL).await;
+                }
+                Some(res) => {
+                    let final_status = if res.is_ok() {
+                        LocalMessageStatus::Delivered
+                    } else {
+                        LocalMessageStatus::Failed
+                    };
+                    self.emit_local_message(
+                        &message_id,
+                        from_session_id.as_deref(),
+                        &from_title,
+                        &to_session_id,
+                        &to_title,
+                        final_status,
+                        woke_up,
+                        &preview,
+                    );
+
+                    let popped = {
+                        let mut queues = self.local_queues.lock().unwrap_or_else(|e| e.into_inner());
+                        queues.get_mut(&target_id).and_then(|q| q.pending.pop_front())
+                    };
+                    if let Some(mut item) = popped {
+                        if let Some(tx) = item.done_tx.take() {
+                            let _ = tx.send(res);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn send_local_message_inner(
+        &self,
+        req: SendLocalMessageRequest,
+    ) -> VeloxResult<LocalMessageReceipt> {
+        let trimmed_text = req.text.trim();
+        if trimmed_text.is_empty() || req.text.len() > MAX_TASK_TEXT_BYTES {
+            return Err(VeloxError::InvalidInput(format!(
+                "Message text must be 1..={MAX_TASK_TEXT_BYTES} bytes"
+            )));
+        }
+
+        let all_sessions = self.sessions.list_sessions();
+        let candidates: Vec<SessionRecord> = all_sessions
+            .iter()
+            .filter(|s| s.status != SessionStatus::Exited)
+            .cloned()
+            .collect();
+
+        let target = resolve_session_by_query(
+            &candidates,
+            &req.to,
+            "this machine",
+            |s| &s.id,
+            |s| &s.title,
+        )
+        .map_err(VeloxError::InvalidInput)?
+        .clone();
+
+        let has_explicit_sender = req
+            .from_session_id
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            || req
+                .from_session_query
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty());
+
+        let (sender_id, sender_title) = self.resolve_local_sender(
+            &all_sessions,
+            &candidates,
+            req.from_session_id.as_deref(),
+            req.from_session_query.as_deref(),
+        );
+
+        if sender_id.as_deref() == Some(target.id.as_str()) {
+            return Err(VeloxError::InvalidInput(
+                "Cannot send a message to the same session".to_string(),
+            ));
+        }
+
+        let payload = format_direct_local_message(
+            &sender_title,
+            sender_id.as_deref(),
+            trimmed_text,
+            has_explicit_sender,
+        );
+        let preview = make_message_preview(trimmed_text);
+        let message_id = Uuid::new_v4().to_string();
+
+        let mut woke_up = false;
+        let active_target = if target.status == SessionStatus::Sleeping {
+            let woken = self
+                .sessions
+                .wake_session(&target.id, DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS)?;
+            woke_up = true;
+            woken
+        } else {
+            target.clone()
+        };
+
+        let queue_has_pending = {
+            let queues = self.local_queues.lock().unwrap_or_else(|e| e.into_inner());
+            queues
+                .get(&active_target.id)
+                .is_some_and(|q| !q.pending.is_empty() || q.worker_running)
+        };
+
+        if !woke_up
+            && !queue_has_pending
+            && matches!(
+                self.check_local_target_readiness(&active_target, false),
+                TargetReadiness::Ready
+            )
+        {
+            let kind = active_target.active_agent.unwrap_or(active_target.agent_kind);
+            return match self
+                .write_prompt_to_pty(&active_target.id, kind, &payload)
+                .await
+            {
+                Ok(()) => {
+                    self.emit_local_message(
+                        &message_id,
+                        sender_id.as_deref(),
+                        &sender_title,
+                        &active_target.id,
+                        &active_target.title,
+                        LocalMessageStatus::Delivered,
+                        false,
+                        &preview,
+                    );
+                    Ok(LocalMessageReceipt {
+                        message_id,
+                        from_session_id: sender_id,
+                        from_title: sender_title,
+                        to_session_id: active_target.id,
+                        to_title: active_target.title,
+                        status: LocalMessageStatus::Delivered,
+                        woke_up: false,
+                        detail: None,
+                    })
+                }
+                Err(err) => {
+                    self.emit_local_message(
+                        &message_id,
+                        sender_id.as_deref(),
+                        &sender_title,
+                        &active_target.id,
+                        &active_target.title,
+                        LocalMessageStatus::Failed,
+                        false,
+                        &preview,
+                    );
+                    Err(VeloxError::InvalidInput(err))
+                }
+            };
+        }
+
+        let (done_tx, done_rx) = oneshot::channel();
+        let should_spawn = {
+            let mut queues = self.local_queues.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = queues.entry(active_target.id.clone()).or_default();
+            entry.pending.push_back(QueuedLocalMessage {
+                message_id: message_id.clone(),
+                from_session_id: sender_id.clone(),
+                from_title: sender_title.clone(),
+                to_session_id: active_target.id.clone(),
+                to_title: active_target.title.clone(),
+                payload,
+                preview: preview.clone(),
+                woke_up,
+                waiting_after_wake: woke_up,
+                enqueued_at: Instant::now(),
+                done_tx: Some(done_tx),
+            });
+            if !entry.worker_running {
+                entry.worker_running = true;
+                true
+            } else {
+                false
+            }
+        };
+
+        self.emit_local_message(
+            &message_id,
+            sender_id.as_deref(),
+            &sender_title,
+            &active_target.id,
+            &active_target.title,
+            LocalMessageStatus::Queued,
+            woke_up,
+            &preview,
+        );
+
+        if should_spawn && !self.spawn_local_queue_worker(&active_target.id) {
+            let popped = {
+                let mut queues = self.local_queues.lock().unwrap_or_else(|e| e.into_inner());
+                queues.remove(&active_target.id)
+            };
+            drop(popped);
+            return Err(VeloxError::InvalidInput(
+                "TeamHub is no longer active".to_string(),
+            ));
+        }
+
+        match tokio::time::timeout(LOCAL_SEND_WAIT_TIMEOUT, done_rx).await {
+            Ok(Ok(Ok(()))) => Ok(LocalMessageReceipt {
+                message_id,
+                from_session_id: sender_id,
+                from_title: sender_title,
+                to_session_id: active_target.id,
+                to_title: active_target.title,
+                status: LocalMessageStatus::Delivered,
+                woke_up,
+                detail: woke_up.then(|| "Woke sleeping target session and delivered".to_string()),
+            }),
+            Ok(Ok(Err(err))) => Err(VeloxError::InvalidInput(err)),
+            Ok(Err(_closed)) => Err(VeloxError::InvalidInput(
+                "Delivery worker exited before completing delivery".to_string(),
+            )),
+            Err(_elapsed) => Ok(LocalMessageReceipt {
+                message_id,
+                from_session_id: sender_id,
+                from_title: sender_title,
+                to_session_id: active_target.id,
+                to_title: active_target.title,
+                status: LocalMessageStatus::Queued,
+                woke_up,
+                detail: Some(
+                    "Target session is starting or blocked; message remains queued for delivery"
+                        .to_string(),
+                ),
+            }),
+        }
+    }
 }
 
 impl SessionTap for TeamHub {
@@ -1678,6 +2229,68 @@ impl TeamApi for TeamHub {
             }
         })
     }
+
+    fn all_local_sessions(&self) -> Vec<LocalSessionInfo> {
+        let cache = self.summary_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cached_summaries: HashMap<String, Option<String>> = cache
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.summary.clone()))
+            .collect();
+        drop(cache);
+
+        self.sessions
+            .list_sessions()
+            .into_iter()
+            .filter(|s| s.status != SessionStatus::Exited)
+            .map(|s| {
+                let summary = cached_summaries.get(&s.id).cloned().flatten();
+                self.session_info_from_record(s, summary)
+            })
+            .collect()
+    }
+
+    fn send_local_message(
+        &self,
+        req: SendLocalMessageRequest,
+    ) -> BoxFuture<'_, VeloxResult<LocalMessageReceipt>> {
+        Box::pin(async move { self.send_local_message_inner(req).await })
+    }
+}
+
+fn short_session_id(id: &str) -> String {
+    id.trim().chars().take(8).collect()
+}
+
+fn format_direct_local_message(
+    sender_title: &str,
+    sender_id: Option<&str>,
+    text: &str,
+    include_reply_hint: bool,
+) -> String {
+    let clean_title = sender_title.replace(['\r', '\n'], " ");
+    let short_id = sender_id
+        .map(short_session_id)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "external".to_string());
+    if include_reply_hint {
+        format!(
+            "[Velox · mensaje de \"{clean_title}\" ({short_id})]\n{text}\n\n(Para responder: velox msg \"{clean_title}\" \"<tu respuesta>\")"
+        )
+    } else {
+        format!("[Velox · mensaje de \"{clean_title}\" ({short_id})]\n{text}")
+    }
+}
+
+fn make_message_preview(text: &str) -> String {
+    let single_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let count = single_line.chars().count();
+    if count <= 80 {
+        single_line
+    } else {
+        let mut s: String = single_line.chars().take(77).collect();
+        s.push_str("...");
+        s
+    }
 }
 
 fn spawn_on_runtime<F>(fut: F)
@@ -1785,6 +2398,14 @@ mod render_tests {
         }
         fn is_pty_alive(&self, _session_id: &str) -> bool {
             true
+        }
+        fn wake_session(
+            &self,
+            session_id: &str,
+            _cols: u16,
+            _rows: u16,
+        ) -> VeloxResult<SessionRecord> {
+            Err(VeloxError::SessionNotFound(session_id.to_string()))
         }
     }
 

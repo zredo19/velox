@@ -255,3 +255,18 @@ export interface TeamSessionGoneEvent {
   peer: string;
   sessionId: string;
 }
+
+export type LocalMessageStatus = "delivered" | "queued" | "failed";
+
+/** `team-local-message`: direct agent-to-agent message traffic on this machine. */
+export interface LocalMessageEvent {
+  id: string;
+  fromSessionId: string | null;
+  fromTitle: string;
+  toSessionId: string;
+  toTitle: string;
+  status: LocalMessageStatus;
+  wokeUp: boolean;
+  preview: string;
+  timestamp: string;
+}

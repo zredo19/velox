@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AgentPreset,
   CreateSessionRequest,
+  LocalMessageEvent,
   McpGatewaySnapshot,
   PtyOutputEvent,
   ScrollbackSnapshot,
@@ -539,6 +540,7 @@ function createDevMockApi() {
     onTeamPtySnapshot: async (): Promise<UnlistenFn> => () => {},
     onTeamPtyResize: async (): Promise<UnlistenFn> => () => {},
     onTeamSessionGone: async (): Promise<UnlistenFn> => () => {},
+    onTeamLocalMessage: async (): Promise<UnlistenFn> => () => {},
     onPtyOutput: async (): Promise<UnlistenFn> => () => {},
     onSessionUpdated: async (): Promise<UnlistenFn> => () => {},
     onSessionSpawnFailed: async (): Promise<UnlistenFn> => () => {},
@@ -649,6 +651,8 @@ const tauriApi = {
     listen<TeamPtyResizeEvent>("team-pty-resize", (e) => cb(e.payload)),
   onTeamSessionGone: (cb: (ev: TeamSessionGoneEvent) => void): Promise<UnlistenFn> =>
     listen<TeamSessionGoneEvent>("team-session-gone", (e) => cb(e.payload)),
+  onTeamLocalMessage: (cb: (ev: LocalMessageEvent) => void): Promise<UnlistenFn> =>
+    listen<LocalMessageEvent>("team-local-message", (e) => cb(e.payload)),
   onPtyOutput: (cb: (ev: PtyOutputEvent) => void): Promise<UnlistenFn> =>
     listen<PtyOutputEvent>("pty-output", (e) => cb(e.payload)),
   onSessionUpdated: (

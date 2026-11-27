@@ -2,7 +2,10 @@
 //! Lane B owns this file.
 
 use crate::mcp::builtin::BuiltinMcp;
-use crate::team::api::{BoxFuture, PeerStatus, SendTaskRequest, SessionTarget, TeamApi, TeamSnapshot};
+use crate::team::api::{
+    resolve_session_by_query, BoxFuture, LocalMessageStatus, PeerStatus, SendLocalMessageRequest,
+    SendTaskRequest, SessionTarget, TeamApi, TeamSnapshot,
+};
 use crate::team::protocol::{RemoteSessionInfo, TaskState, MAX_READ_LINES, MAX_TASK_TEXT_BYTES};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -27,7 +30,13 @@ impl TeamMcp {
         Self { api }
     }
 
-    async fn dispatch(&self, method: &str, params: Option<&Value>, id: Value) -> Value {
+    async fn dispatch(
+        &self,
+        method: &str,
+        params: Option<&Value>,
+        id: Value,
+        caller_session_id: Option<&str>,
+    ) -> Value {
         match method {
             "initialize" => {
                 let protocol_version = params
@@ -47,18 +56,23 @@ impl TeamMcp {
                             "name": TEAM_MCP_NAME,
                             "version": env!("CARGO_PKG_VERSION"),
                         },
-                        "instructions": "Collaborate with teammates' shared Velox sessions and local live sessions. Call team_list first to see peers and sessions. Use team_send_task to request work in a session — a human on the receiving machine must accept every task; nothing runs automatically. Poll team_task_status with the returned request_id, and use team_read_session for read-only output inspection."
+                        "instructions": "Collaborate with local Velox sessions and remote teammates. For direct local session-to-session messaging on this PC (no approval needed): call session_list, then session_send with target and text (and team_read_session for output). For teammates' shared sessions: call team_list first, then use team_send_task — a human on the receiving machine must accept every task; nothing runs automatically. Poll team_task_status with the returned request_id."
                     }),
                 )
             }
             "ping" => jsonrpc_ok(id, json!({})),
             "tools/list" => jsonrpc_ok(id, json!({ "tools": tool_definitions() })),
-            "tools/call" => self.handle_tools_call(params, id).await,
+            "tools/call" => self.handle_tools_call(params, id, caller_session_id).await,
             _ => jsonrpc_error(id, JSONRPC_METHOD_NOT_FOUND, format!("Method not found: {method}")),
         }
     }
 
-    async fn handle_tools_call(&self, params: Option<&Value>, id: Value) -> Value {
+    async fn handle_tools_call(
+        &self,
+        params: Option<&Value>,
+        id: Value,
+        caller_session_id: Option<&str>,
+    ) -> Value {
         let Some(params_obj) = params.and_then(Value::as_object) else {
             return jsonrpc_error(id, JSONRPC_INVALID_PARAMS, "Invalid params: expected an object");
         };
@@ -84,8 +98,10 @@ impl TeamMcp {
         };
 
         let result = match tool_name {
+            "session_list" => self.tool_session_list(caller_session_id),
+            "session_send" => self.tool_session_send(&args, caller_session_id).await,
             "team_list" => self.tool_list(),
-            "team_send_task" => self.tool_send_task(&args).await,
+            "team_send_task" => self.tool_send_task(&args, caller_session_id).await,
             "team_task_status" => self.tool_task_status(&args),
             "team_read_session" => self.tool_read_session(&args).await,
             _ => {
@@ -100,6 +116,131 @@ impl TeamMcp {
         jsonrpc_ok(id, result)
     }
 
+    fn tool_session_list(&self, caller_session_id: Option<&str>) -> Value {
+        let sessions = self.api.all_local_sessions();
+        let mut out = String::new();
+        let _ = writeln!(out, "Local Velox sessions ({}):", sessions.len());
+        if sessions.is_empty() {
+            let _ = writeln!(out, "  (none)");
+        } else {
+            for s in &sessions {
+                let is_self = caller_session_id
+                    .is_some_and(|cid| cid.eq_ignore_ascii_case(&s.info.id));
+                let tag = if is_self { Some("current session") } else { None };
+                write_session_line(&mut out, tag, &s.info);
+            }
+        }
+
+        let structured_sessions: Vec<Value> = sessions
+            .iter()
+            .map(|s| {
+                let is_self = caller_session_id
+                    .is_some_and(|cid| cid.eq_ignore_ascii_case(&s.info.id));
+                json!({
+                    "id": s.info.id,
+                    "shortId": s.info.id.chars().take(8).collect::<String>(),
+                    "title": s.info.title,
+                    "agentKind": s.info.agent_kind,
+                    "activeAgent": s.info.active_agent,
+                    "status": s.info.status,
+                    "folder": s.info.folder,
+                    "shared": s.shared,
+                    "summary": s.info.summary,
+                    "lastActiveAt": s.info.last_active_at,
+                    "isSelf": is_self,
+                })
+            })
+            .collect();
+
+        json!({
+            "content": [{ "type": "text", "text": out.trim_end() }],
+            "structuredContent": {
+                "currentSessionId": caller_session_id,
+                "sessions": structured_sessions,
+            },
+            "isError": false
+        })
+    }
+
+    async fn tool_session_send(
+        &self,
+        args: &serde_json::Map<String, Value>,
+        caller_session_id: Option<&str>,
+    ) -> Value {
+        let to = match required_non_empty_string(args, "to") {
+            Ok(v) => v,
+            Err(msg) => return tool_error(msg),
+        };
+        let text = match args.get("text").and_then(Value::as_str) {
+            Some(t) if !t.trim().is_empty() => t.to_string(),
+            Some(_) => return tool_error("text must not be empty or whitespace-only"),
+            None => return tool_error("Missing required string argument: text"),
+        };
+        if text.len() > MAX_TASK_TEXT_BYTES {
+            return tool_error(format!(
+                "text is {} bytes, which exceeds the maximum of {MAX_TASK_TEXT_BYTES} bytes",
+                text.len()
+            ));
+        }
+        let from_session = match optional_string_arg(args, "from_session") {
+            Ok(v) => v,
+            Err(msg) => return tool_error(msg),
+        };
+
+        let req = SendLocalMessageRequest {
+            to,
+            text,
+            from_session_id: caller_session_id
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            from_session_query: from_session,
+        };
+
+        match self.api.send_local_message(req).await {
+            Ok(receipt) => {
+                let text_summary = match receipt.status {
+                    LocalMessageStatus::Delivered => {
+                        let wake_note = if receipt.woke_up {
+                            " (woke sleeping session)"
+                        } else {
+                            ""
+                        };
+                        format!(
+                            "Message delivered directly from \"{}\" to \"{}\"{wake_note}.",
+                            receipt.from_title, receipt.to_title
+                        )
+                    }
+                    LocalMessageStatus::Queued => {
+                        let detail = receipt
+                            .detail
+                            .as_deref()
+                            .map(|d| format!(" {d}"))
+                            .unwrap_or_default();
+                        format!(
+                            "Message queued for \"{}\" from \"{}\".{detail}",
+                            receipt.to_title, receipt.from_title
+                        )
+                    }
+                    LocalMessageStatus::Failed => {
+                        let detail = receipt
+                            .detail
+                            .as_deref()
+                            .unwrap_or("Failed to deliver message");
+                        return tool_error(detail);
+                    }
+                };
+                let structured = serde_json::to_value(&receipt).unwrap_or(Value::Null);
+                json!({
+                    "content": [{ "type": "text", "text": text_summary }],
+                    "structuredContent": structured,
+                    "isError": false
+                })
+            }
+            Err(err) => tool_error(format!("Failed to send message: {err}")),
+        }
+    }
+
     fn tool_list(&self) -> Value {
         let snap = self.api.snapshot();
         let text = format_team_snapshot(&snap);
@@ -111,7 +252,11 @@ impl TeamMcp {
         })
     }
 
-    async fn tool_send_task(&self, args: &serde_json::Map<String, Value>) -> Value {
+    async fn tool_send_task(
+        &self,
+        args: &serde_json::Map<String, Value>,
+        caller_session_id: Option<&str>,
+    ) -> Value {
         let peer_arg = match optional_string_arg(args, "peer") {
             Ok(v) => v,
             Err(msg) => return tool_error(msg),
@@ -131,10 +276,19 @@ impl TeamMcp {
                 text.len()
             ));
         }
-        let from_session = match optional_string_arg(args, "from_session") {
+        let explicit_from = match optional_string_arg(args, "from_session") {
             Ok(v) => v,
             Err(msg) => return tool_error(msg),
         };
+        let from_session = explicit_from.or_else(|| {
+            caller_session_id.and_then(|cid| {
+                self.api
+                    .all_local_sessions()
+                    .into_iter()
+                    .find(|s| s.info.id.eq_ignore_ascii_case(cid))
+                    .map(|s| s.info.title)
+            })
+        });
 
         let snap = self.api.snapshot();
         let resolved = match resolve_target(&snap, peer_arg.as_deref(), &session_query) {
@@ -254,6 +408,14 @@ impl TeamMcp {
 
 impl BuiltinMcp for TeamMcp {
     fn handle_jsonrpc(&self, request: Value) -> BoxFuture<'_, Option<Value>> {
+        self.handle_jsonrpc_with_session(request, None)
+    }
+
+    fn handle_jsonrpc_with_session(
+        &self,
+        request: Value,
+        session_id: Option<String>,
+    ) -> BoxFuture<'_, Option<Value>> {
         Box::pin(async move {
             if request.is_array() {
                 return Some(jsonrpc_error(
@@ -310,7 +472,10 @@ impl BuiltinMcp for TeamMcp {
 
             let id = raw_id.cloned().unwrap_or(Value::Null);
             let params = obj.get("params");
-            Some(self.dispatch(method, params, id).await)
+            Some(
+                self.dispatch(method, params, id, session_id.as_deref())
+                    .await,
+            )
         })
     }
 }
@@ -488,76 +653,7 @@ fn resolve_session<'a>(
     query: &str,
     scope_label: &str,
 ) -> Result<&'a RemoteSessionInfo, String> {
-    let q = query.trim();
-    if q.is_empty() {
-        return Err("Session query must not be empty".to_string());
-    }
-
-    let exact_ids: Vec<&RemoteSessionInfo> = candidates
-        .iter()
-        .copied()
-        .filter(|s| s.id.eq_ignore_ascii_case(q))
-        .collect();
-    if exact_ids.len() == 1 {
-        return Ok(exact_ids[0]);
-    }
-    if exact_ids.len() > 1 {
-        return Err(format!(
-            "Ambiguous session ID '{q}' on {scope_label}. Candidates: {}",
-            format_candidates(&exact_ids)
-        ));
-    }
-
-    let exact_titles: Vec<&RemoteSessionInfo> = candidates
-        .iter()
-        .copied()
-        .filter(|s| s.title.eq_ignore_ascii_case(q))
-        .collect();
-    if exact_titles.len() == 1 {
-        return Ok(exact_titles[0]);
-    }
-    if exact_titles.len() > 1 {
-        return Err(format!(
-            "Ambiguous session title '{q}' on {scope_label}. Candidates: {}",
-            format_candidates(&exact_titles)
-        ));
-    }
-
-    let q_lower = q.to_ascii_lowercase();
-    let prefix_matches: Vec<&RemoteSessionInfo> = candidates
-        .iter()
-        .copied()
-        .filter(|s| {
-            s.id.to_ascii_lowercase().starts_with(&q_lower)
-                || s.title.to_ascii_lowercase().starts_with(&q_lower)
-        })
-        .collect();
-    if prefix_matches.len() == 1 {
-        return Ok(prefix_matches[0]);
-    }
-    if prefix_matches.len() > 1 {
-        return Err(format!(
-            "Ambiguous session prefix '{q}' on {scope_label}. Matching candidates: {}",
-            format_candidates(&prefix_matches)
-        ));
-    }
-
-    if candidates.is_empty() {
-        Err(format!("Unknown session '{q}': no sessions available on {scope_label}"))
-    } else {
-        Err(format!(
-            "Unknown session '{q}' on {scope_label}. Available sessions: {}",
-            format_candidates(candidates)
-        ))
-    }
-}
-
-fn format_candidates(sessions: &[&RemoteSessionInfo]) -> String {
-    sessions
-        .iter()
-        .map(|s| format!("\"{}\" (id: {})", s.title, s.id))
-        .collect::<Vec<_>>()
-        .join(", ")
+    resolve_session_by_query(candidates, query, scope_label, |s| &s.id, |s| &s.title).copied()
 }
 
 fn task_state_label(state: TaskState) -> &'static str {
@@ -724,6 +820,36 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["session"]
             }
+        },
+        {
+            "name": "session_list",
+            "description": "List all non-exited local Velox sessions on this machine (both live and sleeping), including IDs, titles, agent types, statuses, folders, and summaries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "session_send",
+            "description": "Send a direct message to another Velox session on this same machine with zero manual inbox approval. Automatically wakes sleeping targets and queues behind confirmation prompts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Target local session ID, exact title, or unique prefix (case-insensitive)."
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Message text to deliver to the target session (non-empty, max 16384 bytes)."
+                    },
+                    "from_session": {
+                        "type": "string",
+                        "description": "Optional fallback title or ID of your own session if X-Velox-Session header is absent."
+                    }
+                },
+                "required": ["to", "text"]
+            }
         }
     ])
 }
@@ -734,7 +860,7 @@ mod tests {
     use crate::domain::agent::AgentKind;
     use crate::domain::error::VeloxError;
     use crate::domain::session::SessionStatus;
-    use crate::team::api::{LocalSessionInfo, TaskDirection, TaskTicket};
+    use crate::team::api::{LocalMessageReceipt, LocalSessionInfo, TaskDirection, TaskTicket};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -744,6 +870,7 @@ mod tests {
         snapshot: TeamSnapshot,
         tickets: Mutex<HashMap<String, TaskTicket>>,
         sent_requests: Mutex<Vec<SendTaskRequest>>,
+        sent_local: Mutex<Vec<SendLocalMessageRequest>>,
         read_replies: Mutex<HashMap<ReadReplyKey, String>>,
     }
 
@@ -868,6 +995,7 @@ mod tests {
                 },
                 tickets: Mutex::new(tickets),
                 sent_requests: Mutex::new(Vec::new()),
+                sent_local: Mutex::new(Vec::new()),
                 read_replies: Mutex::new(read_replies),
             }
         }
@@ -919,6 +1047,41 @@ mod tests {
                     .get(&(target.peer, target.session_id, max_lines))
                     .cloned()
                     .ok_or_else(|| VeloxError::SessionNotFound("not found".into()))
+            })
+        }
+
+        fn all_local_sessions(&self) -> Vec<LocalSessionInfo> {
+            self.snapshot.local_sessions.clone()
+        }
+
+        fn send_local_message(
+            &self,
+            req: SendLocalMessageRequest,
+        ) -> BoxFuture<'_, crate::domain::error::VeloxResult<LocalMessageReceipt>> {
+            Box::pin(async move {
+                self.sent_local.lock().expect("lock").push(req.clone());
+                let from_title = req
+                    .from_session_id
+                    .as_deref()
+                    .and_then(|id| {
+                        self.snapshot
+                            .local_sessions
+                            .iter()
+                            .find(|s| s.info.id == id)
+                            .map(|s| s.info.title.clone())
+                    })
+                    .or(req.from_session_query.clone())
+                    .unwrap_or_else(|| "Rodolfo".into());
+                Ok(LocalMessageReceipt {
+                    message_id: "msg-1".into(),
+                    from_session_id: req.from_session_id,
+                    from_title,
+                    to_session_id: "local-2222-bbbb".into(),
+                    to_title: req.to,
+                    status: LocalMessageStatus::Delivered,
+                    woke_up: false,
+                    detail: None,
+                })
             })
         }
     }
@@ -981,14 +1144,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_exposes_four_tools_with_approval_rule() {
+    async fn tools_list_exposes_six_tools_with_approval_and_direct_messaging() {
         let (mcp, _) = make_mcp();
         let resp = mcp
             .handle_jsonrpc(json!({"jsonrpc": "2.0", "id": 10, "method": "tools/list"}))
             .await
             .expect("tools/list");
         let tools = resp["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 6);
 
         let names: Vec<&str> = tools
             .iter()
@@ -1000,7 +1163,9 @@ mod tests {
                 "team_list",
                 "team_send_task",
                 "team_task_status",
-                "team_read_session"
+                "team_read_session",
+                "session_list",
+                "session_send"
             ]
         );
         for tool in tools {
@@ -1261,5 +1426,108 @@ mod tests {
             resolve_session(&list, "unique", "test").unwrap().id,
             "gamma-1"
         );
+    }
+
+    #[tokio::test]
+    async fn session_list_marks_caller_from_header_and_session_send_prefers_header() {
+        let (mcp, team) = make_mcp();
+
+        let list = mcp
+            .handle_jsonrpc_with_session(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 20,
+                    "method": "tools/call",
+                    "params": { "name": "session_list", "arguments": {} }
+                }),
+                Some("local-1111-aaaa".to_string()),
+            )
+            .await
+            .expect("session_list response");
+        assert_eq!(list["result"]["isError"], false);
+        let list_text = list["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(list_text.contains("[current session]"));
+        assert_eq!(
+            list["result"]["structuredContent"]["currentSessionId"],
+            "local-1111-aaaa"
+        );
+        assert_eq!(
+            list["result"]["structuredContent"]["sessions"][0]["isSelf"],
+            true
+        );
+        assert_eq!(
+            list["result"]["structuredContent"]["sessions"][1]["isSelf"],
+            false
+        );
+
+        let send = mcp
+            .handle_jsonrpc_with_session(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 21,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "session_send",
+                        "arguments": {
+                            "to": "Velox Build",
+                            "text": "Ping build check",
+                            "from_session": "Forged Name"
+                        }
+                    }
+                }),
+                Some("local-1111-aaaa".to_string()),
+            )
+            .await
+            .expect("session_send response");
+        assert_eq!(send["result"]["isError"], false);
+        assert_eq!(
+            send["result"]["structuredContent"]["fromSessionId"],
+            "local-1111-aaaa"
+        );
+        assert_eq!(
+            send["result"]["structuredContent"]["fromTitle"],
+            "Velox Lider"
+        );
+
+        let sent = team.sent_local.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].from_session_id.as_deref(), Some("local-1111-aaaa"));
+        assert_eq!(sent[0].from_session_query.as_deref(), Some("Forged Name"));
+        assert_eq!(sent[0].to, "Velox Build");
+        assert_eq!(sent[0].text, "Ping build check");
+    }
+
+    #[tokio::test]
+    async fn session_send_validates_empty_and_oversized_text() {
+        let (mcp, _) = make_mcp();
+
+        let empty = mcp
+            .handle_jsonrpc(json!({
+                "jsonrpc": "2.0",
+                "id": 30,
+                "method": "tools/call",
+                "params": {
+                    "name": "session_send",
+                    "arguments": { "to": "Velox Build", "text": "   \n " }
+                }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(empty["result"]["isError"], true);
+
+        let oversized = "a".repeat(MAX_TASK_TEXT_BYTES + 1);
+        let too_big = mcp
+            .handle_jsonrpc(json!({
+                "jsonrpc": "2.0",
+                "id": 31,
+                "method": "tools/call",
+                "params": {
+                    "name": "session_send",
+                    "arguments": { "to": "Velox Build", "text": oversized }
+                }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(too_big["result"]["isError"], true);
     }
 }

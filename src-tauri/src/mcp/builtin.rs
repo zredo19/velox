@@ -12,4 +12,12 @@ use serde_json::Value;
 /// `initialize`, `notifications/initialized`, `ping`, `tools/list` and `tools/call`.
 pub trait BuiltinMcp: Send + Sync {
     fn handle_jsonrpc(&self, request: Value) -> BoxFuture<'_, Option<Value>>;
+
+    fn handle_jsonrpc_with_session(
+        &self,
+        request: Value,
+        _session_id: Option<String>,
+    ) -> BoxFuture<'_, Option<Value>> {
+        self.handle_jsonrpc(request)
+    }
 }

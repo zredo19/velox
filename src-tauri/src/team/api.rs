@@ -112,6 +112,137 @@ pub const EVT_TEAM_PTY_OUTPUT: &str = "team-pty-output"; // TeamPtyOutputEvent
 pub const EVT_TEAM_PTY_SNAPSHOT: &str = "team-pty-snapshot"; // TeamPtySnapshotEvent
 pub const EVT_TEAM_PTY_RESIZE: &str = "team-pty-resize"; // TeamPtyResizeEvent
 pub const EVT_TEAM_SESSION_GONE: &str = "team-session-gone"; // TeamSessionGoneEvent
+pub const EVT_TEAM_LOCAL_MESSAGE: &str = "team-local-message"; // LocalMessageEvent
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LocalMessageStatus {
+    Delivered,
+    Queued,
+    Failed,
+}
+
+/// Emitted whenever a direct local session-to-session message is queued, delivered, or fails.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalMessageEvent {
+    pub id: String,
+    pub from_session_id: Option<String>,
+    pub from_title: String,
+    pub to_session_id: String,
+    pub to_title: String,
+    pub status: LocalMessageStatus,
+    pub woke_up: bool,
+    pub preview: String,
+    pub timestamp: String,
+}
+
+/// Request parameters for direct local inter-session messaging (no human inbox approval).
+#[derive(Debug, Clone)]
+pub struct SendLocalMessageRequest {
+    pub to: String,
+    pub text: String,
+    pub from_session_id: Option<String>,
+    pub from_session_query: Option<String>,
+}
+
+/// Result returned to CLI/MCP callers after sending or queueing a direct local message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalMessageReceipt {
+    pub message_id: String,
+    pub from_session_id: Option<String>,
+    pub from_title: String,
+    pub to_session_id: String,
+    pub to_title: String,
+    pub status: LocalMessageStatus,
+    pub woke_up: bool,
+    pub detail: Option<String>,
+}
+
+/// Resolves a session by query: exact ID -> exact title -> unique ID/title prefix (case-insensitive).
+pub fn resolve_session_by_query<'a, T, FId, FTitle>(
+    candidates: &'a [T],
+    query: &str,
+    scope_label: &str,
+    id_of: FId,
+    title_of: FTitle,
+) -> Result<&'a T, String>
+where
+    FId: Fn(&T) -> &str + Copy,
+    FTitle: Fn(&T) -> &str + Copy,
+{
+    let q = query.trim();
+    if q.is_empty() {
+        return Err("Session query must not be empty".to_string());
+    }
+
+    let format_list = |items: &[&T]| -> String {
+        items
+            .iter()
+            .map(|s| format!("\"{}\" (id: {})", title_of(s), id_of(s)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let exact_ids: Vec<&T> = candidates
+        .iter()
+        .filter(|s| id_of(s).eq_ignore_ascii_case(q))
+        .collect();
+    if exact_ids.len() == 1 {
+        return Ok(exact_ids[0]);
+    }
+    if exact_ids.len() > 1 {
+        return Err(format!(
+            "Ambiguous session ID '{q}' on {scope_label}. Candidates: {}",
+            format_list(&exact_ids)
+        ));
+    }
+
+    let exact_titles: Vec<&T> = candidates
+        .iter()
+        .filter(|s| title_of(s).eq_ignore_ascii_case(q))
+        .collect();
+    if exact_titles.len() == 1 {
+        return Ok(exact_titles[0]);
+    }
+    if exact_titles.len() > 1 {
+        return Err(format!(
+            "Ambiguous session title '{q}' on {scope_label}. Candidates: {}",
+            format_list(&exact_titles)
+        ));
+    }
+
+    let q_lower = q.to_ascii_lowercase();
+    let prefix_matches: Vec<&T> = candidates
+        .iter()
+        .filter(|s| {
+            id_of(s).to_ascii_lowercase().starts_with(&q_lower)
+                || title_of(s).to_ascii_lowercase().starts_with(&q_lower)
+        })
+        .collect();
+    if prefix_matches.len() == 1 {
+        return Ok(prefix_matches[0]);
+    }
+    if prefix_matches.len() > 1 {
+        return Err(format!(
+            "Ambiguous session prefix '{q}' on {scope_label}. Matching candidates: {}",
+            format_list(&prefix_matches)
+        ));
+    }
+
+    if candidates.is_empty() {
+        Err(format!(
+            "Unknown session '{q}': no sessions available on {scope_label}"
+        ))
+    } else {
+        let all_refs: Vec<&T> = candidates.iter().collect();
+        Err(format!(
+            "Unknown session '{q}' on {scope_label}. Available sessions: {}",
+            format_list(&all_refs)
+        ))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -168,4 +299,13 @@ pub trait TeamApi: Send + Sync {
         target: SessionTarget,
         max_lines: u32,
     ) -> BoxFuture<'_, VeloxResult<String>>;
+
+    /// All non-exited local sessions (live + sleeping) for `session_list`.
+    fn all_local_sessions(&self) -> Vec<LocalSessionInfo>;
+
+    /// Sends a direct message to a local session without human inbox approval.
+    fn send_local_message(
+        &self,
+        req: SendLocalMessageRequest,
+    ) -> BoxFuture<'_, VeloxResult<LocalMessageReceipt>>;
 }

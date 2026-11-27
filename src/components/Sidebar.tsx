@@ -1,5 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowRight,
   ClipboardCopy,
   Copy,
   Moon,
@@ -11,7 +12,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import type { AgentKind, SessionRecord, TeamSnapshot } from "../types/ipc";
+import type { AgentKind, LocalMessageEvent, SessionRecord, TeamSnapshot } from "../types/ipc";
 import type { AgentActivity } from "../lib/agentActivity";
 import { partitionSessions } from "../hooks/useSessions";
 import { AgentIcon } from "./icons/AgentIcons";
@@ -31,8 +32,10 @@ export interface SidebarProps {
   activity: Record<string, AgentActivity | null>;
   activeSessionId: string | null;
   team?: TeamSnapshot | null;
+  localMessages?: LocalMessageEvent[];
   selectedRemote?: SelectedRemoteTarget | null;
   onSelectSession: (id: string) => void;
+  onDismissLocalMessage?: (id: string) => void;
   onSelectRemote?: (target: SelectedRemoteTarget) => void;
   onToggleShare?: (id: string, shared: boolean) => void;
   onWakeSession: (id: string) => void;
@@ -93,8 +96,10 @@ export const Sidebar = memo(function Sidebar({
   activity,
   activeSessionId,
   team = null,
+  localMessages = [],
   selectedRemote = null,
   onSelectSession,
+  onDismissLocalMessage,
   onSelectRemote,
   onToggleShare,
   onWakeSession,
@@ -642,6 +647,73 @@ export const Sidebar = memo(function Sidebar({
             <Trash2 className="w-3.5 h-3.5" />
             <span>Close session</span>
           </button>
+        </div>
+      )}
+
+      {/* Direct local session traffic toast/indicator */}
+      {localMessages.length > 0 && (
+        <div
+          aria-live="polite"
+          className="px-2 pt-2 pb-1 space-y-1.5 border-t border-white/[0.06]"
+        >
+          {localMessages.map((msg) => {
+            const dotClass =
+              msg.status === "delivered"
+                ? "bg-emerald-400"
+                : msg.status === "queued"
+                  ? "bg-amber-400 velox-dot-pulse"
+                  : "bg-rose-400";
+            const statusLabel =
+              msg.status === "queued"
+                ? msg.wokeUp
+                  ? "waking"
+                  : "queued"
+                : msg.status === "failed"
+                  ? "failed"
+                  : null;
+            return (
+              <div
+                key={msg.id}
+                role="status"
+                title={
+                  msg.preview
+                    ? `${msg.fromTitle} → ${msg.toTitle}: ${msg.preview}`
+                    : `${msg.fromTitle} → ${msg.toTitle}`
+                }
+                className="group flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[var(--velox-elevated)] border border-white/[0.1] shadow-md text-[11.5px] animate-velox-pop-in"
+              >
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotClass}`} />
+                <button
+                  type="button"
+                  onClick={() => onSelectSession(msg.toSessionId)}
+                  className="flex-1 min-w-0 flex items-center gap-1 text-left text-[var(--velox-ink)] hover:text-[var(--velox-accent-soft)] transition-colors cursor-pointer"
+                >
+                  <span className="truncate font-medium">{msg.fromTitle}</span>
+                  <ArrowRight className="w-3 h-3 shrink-0 text-[var(--velox-accent-soft)]" />
+                  <span className="truncate font-medium">{msg.toTitle}</span>
+                </button>
+                {statusLabel && (
+                  <span
+                    className={`shrink-0 text-[10px] font-mono ${
+                      msg.status === "failed" ? "text-rose-300" : "text-amber-300"
+                    }`}
+                  >
+                    {statusLabel}
+                  </span>
+                )}
+                {onDismissLocalMessage && (
+                  <button
+                    type="button"
+                    onClick={() => onDismissLocalMessage(msg.id)}
+                    aria-label="Dismiss message indicator"
+                    className="opacity-0 group-hover:opacity-100 h-4 w-4 flex items-center justify-center rounded text-[var(--velox-ink-muted)] hover:text-[var(--velox-ink)] transition-opacity cursor-pointer shrink-0"
+                  >
+                    <X className="w-2.5 h-2.5" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 

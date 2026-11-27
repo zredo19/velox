@@ -72,7 +72,9 @@ export function App() {
     team,
     tasks,
     pendingIncoming,
+    localMessages,
     error: teamError,
+    dismissLocalMessage,
     setShared,
     sendTask,
     respond,
@@ -481,8 +483,10 @@ export function App() {
             activity={activity}
             activeSessionId={selectedRemote ? null : activeSessionId}
             team={team}
+            localMessages={localMessages}
             selectedRemote={selectedRemote}
             onSelectSession={handleSelectLocalSession}
+            onDismissLocalMessage={dismissLocalMessage}
             onSelectRemote={setSelectedRemote}
             onToggleShare={handleToggleShare}
             onWakeSession={handleWakeLocalSession}

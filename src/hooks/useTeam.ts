@@ -1,6 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { veloxApi } from "../lib/tauri";
-import type { SessionRecord, TaskTicket, TeamSnapshot } from "../types/ipc";
+import type {
+  LocalMessageEvent,
+  SessionRecord,
+  TaskTicket,
+  TeamSnapshot,
+} from "../types/ipc";
 
 function getErrorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
@@ -32,8 +37,10 @@ export interface UseTeamResult {
   team: TeamSnapshot | null;
   tasks: TaskTicket[];
   pendingIncoming: TaskTicket[];
+  localMessages: LocalMessageEvent[];
   error: string | null;
   clearError: () => void;
+  dismissLocalMessage: (id: string) => void;
   setShared: (sessionId: string, shared: boolean) => Promise<SessionRecord | null>;
   sendTask: (
     peer: string | null,
@@ -44,12 +51,40 @@ export interface UseTeamResult {
   refresh: () => Promise<void>;
 }
 
+const LOCAL_MESSAGE_TTL_MS = 5500;
+const LOCAL_MESSAGE_QUEUED_TTL_MS = 180_000;
+const MAX_LOCAL_MESSAGES = 3;
+
+function upsertLocalMessage(
+  list: LocalMessageEvent[],
+  incoming: LocalMessageEvent,
+): LocalMessageEvent[] {
+  const idx = list.findIndex((m) => m.id === incoming.id);
+  if (idx >= 0) {
+    const next = [...list];
+    next[idx] = incoming;
+    return next;
+  }
+  return [incoming, ...list].slice(0, MAX_LOCAL_MESSAGES);
+}
+
 export function useTeam(): UseTeamResult {
   const [team, setTeam] = useState<TeamSnapshot | null>(null);
   const [tasks, setTasks] = useState<TaskTicket[]>([]);
+  const [localMessages, setLocalMessages] = useState<LocalMessageEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const messageTimersRef = useRef<Map<string, number>>(new Map());
 
   const clearError = useCallback(() => setError(null), []);
+
+  const dismissLocalMessage = useCallback((id: string) => {
+    const existing = messageTimersRef.current.get(id);
+    if (existing !== undefined) {
+      window.clearTimeout(existing);
+      messageTimersRef.current.delete(id);
+    }
+    setLocalMessages((prev) => prev.filter((m) => m.id !== id));
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -90,6 +125,8 @@ export function useTeam(): UseTeamResult {
     let mounted = true;
     let unlistenTeam: (() => void) | undefined;
     let unlistenTasks: (() => void) | undefined;
+    let unlistenLocalMsg: (() => void) | undefined;
+    const timers = messageTimersRef.current;
 
     void (async () => {
       await refresh();
@@ -110,6 +147,28 @@ export function useTeam(): UseTeamResult {
         });
         if (mounted) unlistenTasks = uTasks;
         else uTasks();
+
+        const uLocal = await veloxApi.onTeamLocalMessage((ev) => {
+          if (!mounted) return;
+          setLocalMessages((prev) => upsertLocalMessage(prev, ev));
+          const prevTimer = timers.get(ev.id);
+          if (prevTimer !== undefined) {
+            window.clearTimeout(prevTimer);
+          }
+          const ttl =
+            ev.status === "queued"
+              ? LOCAL_MESSAGE_QUEUED_TTL_MS
+              : LOCAL_MESSAGE_TTL_MS;
+          const nextTimer = window.setTimeout(() => {
+            timers.delete(ev.id);
+            if (mounted) {
+              setLocalMessages((prev) => prev.filter((m) => m.id !== ev.id));
+            }
+          }, ttl);
+          timers.set(ev.id, nextTimer);
+        });
+        if (mounted) unlistenLocalMsg = uLocal;
+        else uLocal();
       } catch {
         // Ignore event listener failures outside Tauri runtime or when disabled
       }
@@ -119,6 +178,11 @@ export function useTeam(): UseTeamResult {
       mounted = false;
       unlistenTeam?.();
       unlistenTasks?.();
+      unlistenLocalMsg?.();
+      for (const timer of timers.values()) {
+        window.clearTimeout(timer);
+      }
+      timers.clear();
     };
   }, [refresh]);
 
@@ -181,8 +245,10 @@ export function useTeam(): UseTeamResult {
     team,
     tasks,
     pendingIncoming,
+    localMessages,
     error,
     clearError,
+    dismissLocalMessage,
     setShared,
     sendTask,
     respond,

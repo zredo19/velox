@@ -3,7 +3,7 @@ use crate::domain::session::{McpBackendStatus, McpGatewayMode, McpGatewaySnapsho
 use crate::mcp::backend::StdioMcpBackend;
 use crate::mcp::config::load_backends_config;
 use axum::extract::{Path as AxumPath, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
@@ -265,14 +265,25 @@ async fn status_route(
     (StatusCode::OK, Json(mgr.snapshot().await))
 }
 
+fn extract_velox_session_id(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get("x-velox-session")?.to_str().ok()?.trim();
+    if raw.is_empty() || raw.starts_with("${") {
+        None
+    } else {
+        Some(raw.to_string())
+    }
+}
+
 async fn mcp_rpc_route(
     AxumPath(name): AxumPath<String>,
     State(mgr): State<McpGatewayManager>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    let session_id = extract_velox_session_id(&headers);
     let builtin = mgr.inner.builtins.read().await.get(&name).cloned();
     if let Some(handler) = builtin {
-        return match handler.handle_jsonrpc(body).await {
+        return match handler.handle_jsonrpc_with_session(body, session_id).await {
             Some(response) => (StatusCode::OK, Json(response)),
             None => (StatusCode::ACCEPTED, Json(json!({ "ok": true }))),
         };
@@ -350,5 +361,71 @@ mod tests {
         assert_eq!(snap.total_memory_mb, 0.0);
         assert!(!snap.backends[0].running);
         assert_eq!(snap.backends[0].memory_mb, 0.0);
+    }
+
+    struct CaptureSessionBuiltin {
+        seen: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    impl BuiltinMcp for CaptureSessionBuiltin {
+        fn handle_jsonrpc(&self, _request: Value) -> crate::team::api::BoxFuture<'_, Option<Value>> {
+            Box::pin(async { Some(json!({ "ok": true })) })
+        }
+
+        fn handle_jsonrpc_with_session(
+            &self,
+            _request: Value,
+            session_id: Option<String>,
+        ) -> crate::team::api::BoxFuture<'_, Option<Value>> {
+            self.seen.lock().unwrap().push(session_id);
+            Box::pin(async { Some(json!({ "ok": true })) })
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_rpc_route_forwards_valid_velox_session_header_only() {
+        let dir = std::env::temp_dir().join(format!("velox-mcp-hdr-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let mgr = McpGatewayManager::new(dir.join("backends.json"), 0);
+        let builtin = Arc::new(CaptureSessionBuiltin {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        mgr.register_builtin("cap", builtin.clone()).await;
+
+        let mut h1 = HeaderMap::new();
+        h1.insert("X-Velox-Session", "  sess-123  ".parse().unwrap());
+        let _ = mcp_rpc_route(
+            AxumPath("cap".to_string()),
+            State(mgr.clone()),
+            h1,
+            Json(json!({"jsonrpc": "2.0", "id": 1})),
+        )
+        .await;
+
+        let mut h2 = HeaderMap::new();
+        h2.insert("X-Velox-Session", "${VELOX_SESSION_ID}".parse().unwrap());
+        let _ = mcp_rpc_route(
+            AxumPath("cap".to_string()),
+            State(mgr.clone()),
+            h2,
+            Json(json!({"jsonrpc": "2.0", "id": 2})),
+        )
+        .await;
+
+        let mut h3 = HeaderMap::new();
+        h3.insert("X-Velox-Session", "   ".parse().unwrap());
+        let _ = mcp_rpc_route(
+            AxumPath("cap".to_string()),
+            State(mgr),
+            h3,
+            Json(json!({"jsonrpc": "2.0", "id": 3})),
+        )
+        .await;
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            *builtin.seen.lock().unwrap(),
+            vec![Some("sess-123".to_string()), None, None]
+        );
     }
 }

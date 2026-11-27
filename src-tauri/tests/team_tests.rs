@@ -15,25 +15,28 @@ use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use velox_lib::domain::agent::AgentKind;
 use velox_lib::domain::config::{PeerConfig, TeamConfig};
-use velox_lib::domain::error::VeloxResult;
+use velox_lib::domain::error::{VeloxError, VeloxResult};
 use velox_lib::domain::session::{SessionRecord, SessionStatus};
 use velox_lib::pty::manager::StreamPos;
 use velox_lib::pty::scrollback::RingScrollback;
 use velox_lib::session::manager::SessionTap;
 use velox_lib::team::api::{
-    SendTaskRequest, SessionTarget, TaskDirection, TeamApi, TeamPtyOutputEvent,
-    TeamPtySnapshotEvent, TeamSessionGoneEvent, EVT_TEAM_PTY_OUTPUT, EVT_TEAM_PTY_SNAPSHOT,
-    EVT_TEAM_SESSION_GONE,
+    LocalMessageStatus, SendLocalMessageRequest, SendTaskRequest, SessionTarget, TaskDirection,
+    TeamApi, TeamPtyOutputEvent, TeamPtySnapshotEvent, TeamSessionGoneEvent,
+    EVT_TEAM_LOCAL_MESSAGE, EVT_TEAM_PTY_OUTPUT, EVT_TEAM_PTY_SNAPSHOT, EVT_TEAM_SESSION_GONE,
 };
 use velox_lib::team::delivery::build_task_input;
 use velox_lib::team::hub::{EventSink, LocalSessions, TeamHub};
-use velox_lib::team::protocol::{ClientMsg, ServerMsg, TaskState, PROTOCOL_VERSION, WS_PATH};
+use velox_lib::team::protocol::{
+    ClientMsg, ServerMsg, TaskState, MAX_TASK_TEXT_BYTES, PROTOCOL_VERSION, WS_PATH,
+};
 
 struct FakeLocalSessions {
     sessions: Mutex<Vec<SessionRecord>>,
     scrollbacks: Mutex<HashMap<String, RingScrollback>>,
     sizes: Mutex<HashMap<String, (u16, u16)>>,
     written: Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    woken: Mutex<Vec<String>>,
 }
 
 impl FakeLocalSessions {
@@ -49,7 +52,22 @@ impl FakeLocalSessions {
             scrollbacks: Mutex::new(scrollbacks),
             sizes: Mutex::new(sizes),
             written: Mutex::new(HashMap::new()),
+            woken: Mutex::new(Vec::new()),
         }
+    }
+
+    fn set_status(&self, session_id: &str, status: SessionStatus) {
+        let mut guard = self.sessions.lock().unwrap();
+        if let Some(s) = guard.iter_mut().find(|s| s.id == session_id) {
+            s.status = status;
+        }
+    }
+
+    fn clear_scrollback(&self, session_id: &str) {
+        self.scrollbacks
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), RingScrollback::new(256 * 1024));
     }
 
     fn push_output(&self, hub: &TeamHub, session_id: &str, data: &[u8]) -> StreamPos {
@@ -131,6 +149,22 @@ impl LocalSessions for FakeLocalSessions {
             .unwrap()
             .iter()
             .any(|s| s.id == session_id && !matches!(s.status, SessionStatus::Sleeping | SessionStatus::Exited))
+    }
+
+    fn wake_session(
+        &self,
+        session_id: &str,
+        _cols: u16,
+        _rows: u16,
+    ) -> VeloxResult<SessionRecord> {
+        self.woken.lock().unwrap().push(session_id.to_string());
+        let mut guard = self.sessions.lock().unwrap();
+        let s = guard
+            .iter_mut()
+            .find(|s| s.id == session_id)
+            .ok_or_else(|| VeloxError::SessionNotFound(session_id.to_string()))?;
+        s.status = SessionStatus::Running;
+        Ok(s.clone())
     }
 }
 
@@ -843,6 +877,229 @@ async fn test_task_reject_and_rate_limit_20_per_min() {
         }
         other => panic!("expected TaskUpdate Rejected, got {other:?}"),
     }
+
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn local_messaging_delivers_directly_without_inbox_and_formats_prompt() {
+    let sessions = Arc::new(FakeLocalSessions::new(vec![
+        make_session("11111111-aaaa-bbbb-cccc-000000000001", "velox 1", false, SessionStatus::Idle),
+        make_session("22222222-aaaa-bbbb-cccc-000000000002", "velox 2", false, SessionStatus::Running),
+    ]));
+    let sink = Arc::new(FakeEventSink::new());
+    let hub = TeamHub::new_with_backends(
+        Arc::clone(&sessions) as Arc<dyn LocalSessions>,
+        Some(Arc::clone(&sink) as Arc<dyn EventSink>),
+        TeamConfig::default(),
+    );
+
+    let receipt = hub
+        .send_local_message(SendLocalMessageRequest {
+            to: "velox 2".to_string(),
+            text: "Revisa auth.rs".to_string(),
+            from_session_id: Some("11111111-aaaa-bbbb-cccc-000000000001".to_string()),
+            from_session_query: None,
+        })
+        .await
+        .expect("direct local message");
+
+    assert_eq!(receipt.status, LocalMessageStatus::Delivered);
+    assert!(!receipt.woke_up);
+    assert_eq!(receipt.from_title, "velox 1");
+    assert_eq!(receipt.to_title, "velox 2");
+    // No manual inbox approval entry created
+    assert!(hub.list_tasks().is_empty());
+
+    let expected_prompt = "[Velox · mensaje de \"velox 1\" (11111111)]\nRevisa auth.rs\n\n(Para responder: velox msg \"velox 1\" \"<tu respuesta>\")";
+    let expected_bytes: Vec<u8> = build_task_input(AgentKind::Claude, expected_prompt).concat();
+    assert_eq!(
+        sessions.written_bytes("22222222-aaaa-bbbb-cccc-000000000002"),
+        expected_bytes
+    );
+
+    let ev = sink
+        .wait_for(Duration::from_secs(2), |name, val| {
+            name == EVT_TEAM_LOCAL_MESSAGE && val["status"] == "delivered"
+        })
+        .await
+        .expect("local message event");
+    assert_eq!(ev["fromTitle"], "velox 1");
+    assert_eq!(ev["toTitle"], "velox 2");
+}
+
+#[tokio::test]
+async fn local_messaging_rejects_self_send_exited_and_oversized() {
+    let sessions = Arc::new(FakeLocalSessions::new(vec![
+        make_session("s1-aaaa", "Lider", false, SessionStatus::Idle),
+        make_session("s2-exit", "Closed Tab", false, SessionStatus::Exited),
+    ]));
+    let hub = TeamHub::new_with_backends(
+        Arc::clone(&sessions) as Arc<dyn LocalSessions>,
+        None,
+        TeamConfig::default(),
+    );
+
+    let self_err = hub
+        .send_local_message(SendLocalMessageRequest {
+            to: "Lider".to_string(),
+            text: "hola yo".to_string(),
+            from_session_id: Some("s1-aaaa".to_string()),
+            from_session_query: None,
+        })
+        .await
+        .expect_err("self-send should fail");
+    assert!(self_err.to_string().contains("same session"));
+
+    let exited_err = hub
+        .send_local_message(SendLocalMessageRequest {
+            to: "Closed Tab".to_string(),
+            text: "ping".to_string(),
+            from_session_id: Some("s1-aaaa".to_string()),
+            from_session_query: None,
+        })
+        .await
+        .expect_err("exited target should fail");
+    assert!(exited_err.to_string().contains("Unknown session"));
+
+    let big_err = hub
+        .send_local_message(SendLocalMessageRequest {
+            to: "s1-aaaa".to_string(),
+            text: "x".repeat(MAX_TASK_TEXT_BYTES + 1),
+            from_session_id: None,
+            from_session_query: None,
+        })
+        .await
+        .expect_err("oversized text should fail");
+    assert!(big_err.to_string().contains("bytes"));
+}
+
+#[tokio::test]
+async fn local_messaging_wakes_sleeping_target_and_delivers_when_ready() {
+    let sessions = Arc::new(FakeLocalSessions::new(vec![
+        make_session("sender-11", "velox 1", false, SessionStatus::Idle),
+        make_session("sleep-22", "velox 2", false, SessionStatus::Sleeping),
+    ]));
+    let sink = Arc::new(FakeEventSink::new());
+    let hub = TeamHub::new_with_backends(
+        Arc::clone(&sessions) as Arc<dyn LocalSessions>,
+        Some(Arc::clone(&sink) as Arc<dyn EventSink>),
+        TeamConfig::default(),
+    );
+
+    let sessions_bg = Arc::clone(&sessions);
+    let hub_bg = Arc::clone(&hub);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        // First emit early non-ready boot output, then full Claude prompt
+        sessions_bg.push_output(&hub_bg, "sleep-22", b"Windows PowerShell\r\n");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        sessions_bg.set_status("sleep-22", SessionStatus::Idle);
+        sessions_bg.push_output(
+            &hub_bg,
+            "sleep-22",
+            "────────────\n❯ \n────────────\n".as_bytes(),
+        );
+    });
+
+    let receipt = hub
+        .send_local_message(SendLocalMessageRequest {
+            to: "velox 2".to_string(),
+            text: "Desperta!".to_string(),
+            from_session_id: Some("sender-11".to_string()),
+            from_session_query: None,
+        })
+        .await
+        .expect("wake + deliver");
+
+    assert_eq!(receipt.status, LocalMessageStatus::Delivered);
+    assert!(receipt.woke_up);
+    assert_eq!(*sessions.woken.lock().unwrap(), vec!["sleep-22".to_string()]);
+    assert!(String::from_utf8_lossy(&sessions.written_bytes("sleep-22")).contains("Desperta!"));
+
+    // Both queued and delivered events were emitted
+    sink.wait_for(Duration::from_secs(2), |n, v| {
+        n == EVT_TEAM_LOCAL_MESSAGE && v["status"] == "queued"
+    })
+    .await
+    .expect("queued event");
+    sink.wait_for(Duration::from_secs(2), |n, v| {
+        n == EVT_TEAM_LOCAL_MESSAGE && v["status"] == "delivered"
+    })
+    .await
+    .expect("delivered event");
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn local_messaging_queues_when_blocked_and_delivers_into_busy_agy() {
+    let mut agy_busy = make_session("agy-1111", "AGY Busy", false, SessionStatus::Running);
+    agy_busy.agent_kind = AgentKind::Agy;
+    agy_busy.active_agent = Some(AgentKind::Agy);
+    let mut agy_blocked = make_session("agy-2222", "AGY Blocked", false, SessionStatus::Blocked);
+    agy_blocked.agent_kind = AgentKind::Agy;
+    agy_blocked.active_agent = Some(AgentKind::Agy);
+
+    let sessions = Arc::new(FakeLocalSessions::new(vec![agy_busy, agy_blocked]));
+    let sink = Arc::new(FakeEventSink::new());
+    let hub = TeamHub::new_with_backends(
+        Arc::clone(&sessions) as Arc<dyn LocalSessions>,
+        Some(Arc::clone(&sink) as Arc<dyn EventSink>),
+        TeamConfig::default(),
+    );
+
+    // 1. Blocked AGY queues until trust/permission prompt clears
+    sessions.push_output(
+        &hub,
+        "agy-2222",
+        "Do you trust the contents of this project?\n> Yes\n  ↑/↓ Navigate · enter Confirm\n"
+            .as_bytes(),
+    );
+    let sessions_bg = Arc::clone(&sessions);
+    let hub_bg = Arc::clone(&hub);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        // Must still NOT have written while blocked
+        assert!(sessions_bg.written_bytes("agy-2222").is_empty());
+        sessions_bg.clear_scrollback("agy-2222");
+        sessions_bg.set_status("agy-2222", SessionStatus::Idle);
+        sessions_bg.push_output(
+            &hub_bg,
+            "agy-2222",
+            "\x1b[2J\x1b[HAntigravity CLI 1.5.3\n────────────────────────\n>\n────────────────────────\n"
+                .as_bytes(),
+        );
+    });
+
+    let blocked_receipt = hub
+        .send_local_message(SendLocalMessageRequest {
+            to: "agy-2222".to_string(),
+            text: "Listo el fix".to_string(),
+            from_session_id: Some("agy-1111".to_string()),
+            from_session_query: None,
+        })
+        .await
+        .expect("blocked -> delivered");
+    assert_eq!(blocked_receipt.status, LocalMessageStatus::Delivered);
+    assert!(String::from_utf8_lossy(&sessions.written_bytes("agy-2222")).contains("Listo el fix"));
+
+    // 2. Live busy AGY accepts input directly without dropping (matches ConPTY probe)
+    sessions.push_output(
+        &hub,
+        "agy-1111",
+        "Antigravity CLI 1.5.3\n────────────────────────\n⣷  Generating...\n────────────────────────\n".as_bytes(),
+    );
+    let busy_receipt = hub
+        .send_local_message(SendLocalMessageRequest {
+            to: "agy-1111".to_string(),
+            text: "Queued turn".to_string(),
+            from_session_id: Some("agy-2222".to_string()),
+            from_session_query: None,
+        })
+        .await
+        .expect("busy agy delivery");
+    assert_eq!(busy_receipt.status, LocalMessageStatus::Delivered);
+    assert!(String::from_utf8_lossy(&sessions.written_bytes("agy-1111")).contains("Queued turn"));
 
     hub.shutdown().await;
 }
