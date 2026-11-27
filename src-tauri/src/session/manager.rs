@@ -23,6 +23,12 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
+/// Hook receiving live PTY output and resize notifications (used by `TeamHub`).
+pub trait SessionTap: Send + Sync {
+    fn on_output(&self, session_id: &str, data: &[u8], pos: StreamPos);
+    fn on_resize(&self, session_id: &str, cols: u16, rows: u16);
+}
+
 /// Coordinates persisted sessions, ConPTY instances, lazy-restore, and auto-hibernation.
 pub struct SessionManager {
     sessions: Arc<RwLock<Vec<SessionRecord>>>,
@@ -34,6 +40,10 @@ pub struct SessionManager {
     shutting_down: Arc<AtomicBool>,
     /// Size a pane asked for while its PTY was still being spawned (applied at spawn).
     pending_sizes: Arc<Mutex<HashMap<String, (u16, u16)>>>,
+    /// Current live PTY dimensions per session (`cols, rows`).
+    pty_sizes: Arc<Mutex<HashMap<String, (u16, u16)>>>,
+    /// Optional tap receiving live PTY output and resize events.
+    tap: Arc<RwLock<Option<Arc<dyn SessionTap>>>>,
     /// Serializes the decision part of create/wake/sleep/close now that those commands run
     /// off the main thread (they used to be serialized by it).
     lifecycle: Mutex<()>,
@@ -65,8 +75,34 @@ impl SessionManager {
             started_at: Arc::new(Mutex::new(HashMap::new())),
             shutting_down: Arc::new(AtomicBool::new(false)),
             pending_sizes: Arc::new(Mutex::new(HashMap::new())),
+            pty_sizes: Arc::new(Mutex::new(HashMap::new())),
+            tap: Arc::new(RwLock::new(None)),
             lifecycle: Mutex::new(()),
         }
+    }
+
+    /// Registers a tap that receives live PTY output and resize notifications.
+    pub fn set_tap(&self, tap: Arc<dyn SessionTap>) {
+        *self.tap.write().unwrap_or_else(|e| e.into_inner()) = Some(tap);
+    }
+
+    /// Returns the last known live PTY dimensions `(cols, rows)` for `session_id`.
+    pub fn pty_size(&self, session_id: &str) -> Option<(u16, u16)> {
+        self.pty_sizes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .copied()
+    }
+
+    /// Returns raw scrollback bytes together with the stream position they cover.
+    pub fn get_scrollback_with_pos(&self, session_id: &str) -> (Vec<u8>, StreamPos) {
+        self.pty.get_scrollback_with_pos(session_id)
+    }
+
+    /// Returns `true` when the underlying PTY process for `session_id` is alive.
+    pub fn is_pty_alive(&self, session_id: &str) -> bool {
+        self.pty.is_alive(session_id)
     }
 
     pub fn list_sessions(&self) -> Vec<SessionRecord> {
@@ -116,6 +152,7 @@ impl SessionManager {
     ) -> (OutputCallback, ExitCallback) {
         let sessions_out = Arc::clone(&self.sessions);
         let activity_out = Arc::clone(&self.last_activity);
+        let tap_out = Arc::clone(&self.tap);
         let app_out = app.clone();
 
         let on_output: OutputCallback =
@@ -130,6 +167,15 @@ impl SessionManager {
                         end_offset: pos.end_offset,
                     },
                 );
+
+                if let Some(tap) = tap_out
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .cloned()
+                {
+                    tap.on_output(session_id, data, pos);
+                }
 
                 activity_out
                     .lock()
@@ -162,6 +208,7 @@ impl SessionManager {
 
         let sessions_exit = Arc::clone(&self.sessions);
         let started_exit = Arc::clone(&self.started_at);
+        let sizes_exit = Arc::clone(&self.pty_sizes);
         let shutting_down = Arc::clone(&self.shutting_down);
         let app_exit = app;
 
@@ -170,6 +217,10 @@ impl SessionManager {
             if shutting_down.load(Ordering::SeqCst) {
                 return;
             }
+            sizes_exit
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(session_id);
             let started = started_exit
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -334,6 +385,8 @@ impl SessionManager {
         let (on_output, on_exit) = self.build_callbacks(app.clone(), preset.kind);
         let pty = Arc::clone(&self.pty);
         let pending_sizes = Arc::clone(&self.pending_sizes);
+        let pty_sizes = Arc::clone(&self.pty_sizes);
+        let tap = Arc::clone(&self.tap);
         let sessions = Arc::clone(&self.sessions);
         let shutting_down = Arc::clone(&self.shutting_down);
         let app = app.clone();
@@ -365,9 +418,26 @@ impl SessionManager {
             let (cols, rows) = take_size().unwrap_or((cols, rows));
             let result = pty.spawn(&session_id, &spec, cols, rows, on_output, on_exit);
             if result.is_ok() {
+                let mut final_cols = cols.max(10);
+                let mut final_rows = rows.max(2);
                 // A resize that raced with the spawn was parked instead of applied.
                 if let Some((c, r)) = take_size() {
-                    let _ = pty.resize(&session_id, c, r);
+                    if pty.resize(&session_id, c, r).is_ok() {
+                        final_cols = c.max(10);
+                        final_rows = r.max(2);
+                    }
+                }
+                pty_sizes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(session_id.clone(), (final_cols, final_rows));
+                if let Some(t) = tap
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .cloned()
+                {
+                    t.on_resize(&session_id, final_cols, final_rows);
                 }
             }
             let outcome = {
@@ -408,6 +478,10 @@ impl SessionManager {
                 None => {
                     // Closed, hibernated or shutting down while we were spawning.
                     if result.is_ok() {
+                        pty_sizes
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&session_id);
                         let _ = pty.kill(&session_id);
                     }
                 }
@@ -521,6 +595,10 @@ impl SessionManager {
             }
         }
 
+        self.pty_sizes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id);
         let _ = self.pty.kill(session_id);
 
         let now = Utc::now();
@@ -625,6 +703,10 @@ impl SessionManager {
             (cloned, guard.clone())
         };
 
+        self.pty_sizes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id);
         let _ = self.pty.kill(session_id);
         let _ = save_sessions(&snapshot);
         let _ = app.emit(
@@ -666,6 +748,10 @@ impl SessionManager {
     pub fn close_session(&self, _app: &AppHandle, session_id: &str) -> VeloxResult<()> {
         let _lifecycle = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         self.pending_sizes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id);
+        self.pty_sizes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(session_id);
@@ -731,12 +817,43 @@ impl SessionManager {
         snapshot
     }
 
-    pub fn write_pty(&self, session_id: &str, data: &str) -> VeloxResult<()> {
+    pub fn set_session_shared(
+        &self,
+        app: &AppHandle,
+        session_id: &str,
+        shared: bool,
+    ) -> VeloxResult<SessionRecord> {
+        let (updated, snapshot) = {
+            let mut guard = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+            let record = guard
+                .iter_mut()
+                .find(|s| s.id == session_id)
+                .ok_or_else(|| VeloxError::SessionNotFound(session_id.to_string()))?;
+            record.shared = shared;
+            let cloned = record.clone();
+            (cloned, guard.clone())
+        };
+
+        let _ = save_sessions(&snapshot);
+        let _ = app.emit(
+            "session-updated",
+            SessionUpdatedEvent {
+                session: updated.clone(),
+            },
+        );
+        Ok(updated)
+    }
+
+    pub fn write_pty_bytes(&self, session_id: &str, data: &[u8]) -> VeloxResult<()> {
         self.last_activity
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(session_id.to_string(), Instant::now());
-        self.pty.write(session_id, data.as_bytes())
+        self.pty.write(session_id, data)
+    }
+
+    pub fn write_pty(&self, session_id: &str, data: &str) -> VeloxResult<()> {
+        self.write_pty_bytes(session_id, data.as_bytes())
     }
 
     pub fn resize_pty(&self, session_id: &str, cols: u16, rows: u16) -> VeloxResult<()> {
@@ -756,7 +873,22 @@ impl SessionManager {
             }
             return Ok(());
         }
-        self.pty.resize(session_id, cols, rows)
+        self.pty.resize(session_id, cols, rows)?;
+        let clamped = (cols.max(10), rows.max(2));
+        self.pty_sizes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string(), clamped);
+        if let Some(tap) = self
+            .tap
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
+        {
+            tap.on_resize(session_id, clamped.0, clamped.1);
+        }
+        Ok(())
     }
 
     pub fn get_scrollback_snapshot(&self, session_id: &str) -> ScrollbackSnapshot {
