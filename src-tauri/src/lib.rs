@@ -14,7 +14,7 @@ use crate::telemetry::monitor::TelemetryMonitor;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{Emitter, RunEvent};
+use tauri::{Emitter, Manager, RunEvent};
 
 /// Shared application state managed by Tauri across IPC commands and background tasks.
 #[derive(Clone)]
@@ -106,6 +106,11 @@ pub fn run() {
             tauri::async_runtime::spawn_blocking(move || {
                 session::bootstrap::bootstrap_local_messaging(bootstrap_port);
             });
+
+            #[cfg(windows)]
+            if let Some(main_win) = app.get_webview_window("main") {
+                install_windows_shutdown_hook(&main_win, Arc::clone(&setup_state.sessions));
+            }
 
             // Boot embedded Lazy MCP Gateway if enabled
             if mcp_enabled {
@@ -201,4 +206,60 @@ pub fn run() {
             });
         }
     });
+}
+
+#[cfg(windows)]
+fn install_windows_shutdown_hook(win: &tauri::WebviewWindow, sessions: Arc<SessionManager>) {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, SetWindowLongPtrW, GWLP_WNDPROC, WM_ENDSESSION,
+        WM_QUERYENDSESSION, WNDPROC,
+    };
+
+    static SESSIONS: OnceLock<Arc<SessionManager>> = OnceLock::new();
+    static PREV_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+
+    unsafe extern "system" fn wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_QUERYENDSESSION {
+            if let Some(mgr) = SESSIONS.get() {
+                mgr.persist_snapshot();
+            }
+        } else if msg == WM_ENDSESSION && wparam.0 != 0 {
+            if let Some(mgr) = SESSIONS.get() {
+                mgr.shutdown();
+            }
+        }
+        let prev = PREV_WNDPROC.load(Ordering::SeqCst);
+        if prev != 0 {
+            let prev_fn: WNDPROC = Some(std::mem::transmute::<
+                isize,
+                unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+            >(prev));
+            CallWindowProcW(prev_fn, hwnd, msg, wparam, lparam)
+        } else {
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+    }
+
+    let Ok(raw_hwnd) = win.hwnd() else {
+        return;
+    };
+    let hwnd = HWND(raw_hwnd.0);
+    let _ = SESSIONS.set(sessions);
+    // Only install once; compare_exchange prevents overwriting PREV_WNDPROC on re-entry.
+    if PREV_WNDPROC.load(Ordering::SeqCst) == 0 {
+        unsafe {
+            let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, wnd_proc as *const () as isize);
+            if prev != 0 {
+                PREV_WNDPROC.store(prev, Ordering::SeqCst);
+            }
+        }
+    }
 }

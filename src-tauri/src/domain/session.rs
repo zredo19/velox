@@ -28,6 +28,10 @@ pub struct SessionRecord {
     pub cwd: String,
     pub status: SessionStatus,
     pub agent_session_id: Option<String>,
+    /// Prior conversation IDs preserved whenever the active ID is replaced or skipped on wake,
+    /// so no conversation is ever permanently orphaned by a transient resumability failure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_agent_session_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wake_as_shell: bool,
     pub pid: Option<u32>,
@@ -38,6 +42,46 @@ pub struct SessionRecord {
     /// Velox Online: teammates may see this session (read-only) and send it task requests.
     #[serde(default)]
     pub shared: bool,
+}
+
+const MAX_PREVIOUS_AGENT_SESSION_IDS: usize = 20;
+
+impl SessionRecord {
+    /// Archive `old_id` into `previous_agent_session_ids` (deduplicated, bounded) before replacing
+    /// `agent_session_id`.
+    pub fn preserve_previous_agent_session_id(&mut self, old_id: &str) {
+        let trimmed = old_id.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Some(pos) = self
+            .previous_agent_session_ids
+            .iter()
+            .position(|existing| existing == trimmed)
+        {
+            self.previous_agent_session_ids.remove(pos);
+        }
+        self.previous_agent_session_ids.push(trimmed.to_string());
+        if self.previous_agent_session_ids.len() > MAX_PREVIOUS_AGENT_SESSION_IDS {
+            let overflow = self.previous_agent_session_ids.len() - MAX_PREVIOUS_AGENT_SESSION_IDS;
+            self.previous_agent_session_ids.drain(..overflow);
+        }
+    }
+
+    /// Update `agent_session_id` to `next`, preserving any distinct prior ID in
+    /// `previous_agent_session_ids`. Returns `true` if `agent_session_id` changed.
+    pub fn set_agent_session_id_preserving(&mut self, next: Option<String>) -> bool {
+        if self.agent_session_id == next {
+            return false;
+        }
+        if let Some(old) = self.agent_session_id.take() {
+            if next.as_deref() != Some(old.as_str()) {
+                self.preserve_previous_agent_session_id(&old);
+            }
+        }
+        self.agent_session_id = next;
+        true
+    }
 }
 
 /// Streamed PTY output chunk emitted via Tauri event `"pty-output"`.

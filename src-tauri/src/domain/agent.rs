@@ -447,7 +447,7 @@ pub fn resolve_launch_spec(
     cwd: &Path,
     launch: AgentLaunch<'_>,
 ) -> AgentSpawnSpec {
-    resolve_launch_spec_with_context(preset, cwd, launch, None)
+    resolve_launch_spec_with_options(preset, cwd, launch, None, None)
 }
 
 /// Like [`resolve_launch_spec`] with optional per-session Velox messaging identity and CLI PATH.
@@ -457,6 +457,28 @@ pub fn resolve_launch_spec_with_context(
     launch: AgentLaunch<'_>,
     ctx: Option<&SessionLaunchContext<'_>>,
 ) -> AgentSpawnSpec {
+    resolve_launch_spec_with_options(preset, cwd, launch, ctx, None)
+}
+
+/// Like [`resolve_launch_spec`] and optionally injects `--settings <path>` for Claude Code so
+/// Velox's `SessionStart` hook is merged alongside the user's own hooks.
+pub fn resolve_launch_spec_with_settings(
+    preset: &AgentPreset,
+    cwd: &Path,
+    launch: AgentLaunch<'_>,
+    claude_settings_path: Option<&Path>,
+) -> AgentSpawnSpec {
+    resolve_launch_spec_with_options(preset, cwd, launch, None, claude_settings_path)
+}
+
+/// Unified spawn-spec builder combining Velox messaging context and Claude hook settings.
+pub fn resolve_launch_spec_with_options(
+    preset: &AgentPreset,
+    cwd: &Path,
+    launch: AgentLaunch<'_>,
+    ctx: Option<&SessionLaunchContext<'_>>,
+    claude_settings_path: Option<&Path>,
+) -> AgentSpawnSpec {
     let mut agent_args = preset.args.clone();
     let mut env = preset.env.clone();
 
@@ -465,6 +487,13 @@ pub fn resolve_launch_spec_with_context(
         .or_insert_with(|| "xterm-256color".to_string());
     env.entry("COLORTERM".to_string())
         .or_insert_with(|| "truecolor".to_string());
+
+    if preset.kind == AgentKind::Claude {
+        if let Some(settings_path) = claude_settings_path {
+            agent_args.push("--settings".to_string());
+            agent_args.push(settings_path.to_string_lossy().into_owned());
+        }
+    }
 
     if let AgentLaunch::NewWithId(id) = launch {
         if preset.kind == AgentKind::Claude && !id.trim().is_empty() {
@@ -652,9 +681,26 @@ mod tests {
             "& 'claude.exe' '--session-id' 'id-1'"
         );
 
-        // Non-Claude agents ignore NewWithId
+        let settings = Path::new(r"C:\velox\hooks\claude-settings.json");
+        let with_settings = resolve_launch_spec_with_settings(
+            &preset,
+            Path::new("."),
+            AgentLaunch::Resume("id-1"),
+            Some(settings),
+        );
+        assert_eq!(
+            decoded_ps_script(&with_settings),
+            r"& 'claude.exe' '--settings' 'C:\velox\hooks\claude-settings.json' '--resume' 'id-1'"
+        );
+
+        // Non-Claude agents ignore NewWithId and claude_settings_path
         let agy = sample_preset(AgentKind::Agy, "agy.exe");
-        let spec = resolve_launch_spec(&agy, Path::new("."), AgentLaunch::NewWithId("id-1"));
+        let spec = resolve_launch_spec_with_settings(
+            &agy,
+            Path::new("."),
+            AgentLaunch::NewWithId("id-1"),
+            Some(settings),
+        );
         assert_eq!(decoded_ps_script(&spec), "& 'agy.exe'");
     }
 

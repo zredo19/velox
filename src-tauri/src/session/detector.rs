@@ -1,12 +1,10 @@
 use crate::domain::agent::AgentKind;
 use crate::domain::session::SessionStatus;
-use chrono::{DateTime, Utc};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::SystemTime;
 
 static ANSI_RE: OnceLock<Option<Regex>> = OnceLock::new();
 static UUID_RE: OnceLock<Option<Regex>> = OnceLock::new();
@@ -414,8 +412,8 @@ pub fn detect_status_from_output(_kind: AgentKind, raw_chunk: &[u8]) -> Option<S
     None
 }
 
-fn is_uuid(s: &str) -> bool {
-    uuid_regex().is_some_and(|re| re.is_match(s))
+pub fn is_uuid(s: &str) -> bool {
+    uuid_regex().is_some_and(|re| re.is_match(s.trim()))
 }
 
 fn normalize_path(p: &str) -> String {
@@ -477,16 +475,32 @@ fn claude_project_dirs_for_cwd(profile: Option<&str>, cwd: &str) -> Vec<PathBuf>
     out
 }
 
-/// True when a Claude transcript contains at least one real user turn (resuming anything else
-/// opens an empty conversation).
-fn claude_transcript_has_messages(path: &Path) -> bool {
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
+enum TranscriptCheck {
+    HasMessages,
+    Empty,
+    TransientError(String),
+}
+
+fn inspect_claude_transcript(path: &Path) -> TranscriptCheck {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(err) if err.kind() == ErrorKind::NotFound => return TranscriptCheck::Empty,
+        Err(err) => return TranscriptCheck::TransientError(err.to_string()),
     };
-    BufReader::new(file)
+    let has_messages = BufReader::new(file)
         .lines()
         .map_while(Result::ok)
-        .any(|line| line.contains("\"type\":\"user\""))
+        .any(|line| {
+            line.contains("\"type\":\"user\"")
+                || line.contains("\"type\": \"user\"")
+                || line.contains("\"type\":\"assistant\"")
+                || line.contains("\"type\": \"assistant\"")
+        });
+    if has_messages {
+        TranscriptCheck::HasMessages
+    } else {
+        TranscriptCheck::Empty
+    }
 }
 
 /// Locate the transcript file for a Claude session ID in any project dir of the profile.
@@ -510,14 +524,22 @@ fn agy_root() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".gemini").join("antigravity-cli"))
 }
 
-struct AgyHistoryEntry {
-    timestamp_ms: i64,
-    workspace: String,
-    conversation_id: Option<String>,
+pub fn agy_conversation_exists(session_id: &str) -> bool {
+    is_uuid(session_id)
+        && agy_root()
+            .map(|root| root.join("conversations").join(format!("{session_id}.db")))
+            .is_some_and(|p| p.is_file())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgyHistoryEntry {
+    pub timestamp_ms: i64,
+    pub workspace: String,
+    pub conversation_id: Option<String>,
 }
 
 /// Parse `~/.gemini/antigravity-cli/history.jsonl` (one entry per prompt) in file order.
-fn read_agy_history() -> Option<Vec<AgyHistoryEntry>> {
+pub fn read_agy_history() -> Option<Vec<AgyHistoryEntry>> {
     let raw = std::fs::read_to_string(agy_root()?.join("history.jsonl")).ok()?;
     Some(
         raw.lines()
@@ -576,15 +598,68 @@ pub fn agent_session_belongs_to_cwd(
     }
 }
 
-/// Find the most recent conversation of `cwd` that no other Velox tab owns. Used to repair a tab
-/// whose stored conversation turned out to belong to another tab.
-pub fn recover_agent_session_id(
+/// Result of checking whether a persisted `agent_session_id` can be safely resumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resumability {
+    Resumable,
+    NotResumable(String),
+}
+
+/// Check whether `session_id` points at a conversation the CLI can resume with content, returning
+/// an explicit reason when not resumable. Transient file-read locks on an existing transcript keep
+/// it marked `Resumable` so we never orphan a conversation over a temporary I/O hiccup.
+pub fn check_agent_session_resumable(
     kind: AgentKind,
     profile: Option<&str>,
-    cwd: &str,
-    claimed: &HashSet<String>,
-) -> Option<String> {
-    discover_agent_session_id(kind, profile, cwd, DateTime::<Utc>::UNIX_EPOCH, claimed)
+    session_id: &str,
+) -> Resumability {
+    match kind {
+        AgentKind::Claude => {
+            if !is_uuid(session_id) {
+                return Resumability::NotResumable("invalid Claude UUID".to_string());
+            }
+            let Some(path) = find_claude_transcript(profile, session_id) else {
+                return Resumability::NotResumable(format!(
+                    "Claude transcript {session_id}.jsonl not found (profile={profile:?})"
+                ));
+            };
+            match inspect_claude_transcript(&path) {
+                TranscriptCheck::HasMessages => Resumability::Resumable,
+                TranscriptCheck::Empty => Resumability::NotResumable(format!(
+                    "Claude transcript {} has no user/assistant messages",
+                    path.display()
+                )),
+                TranscriptCheck::TransientError(err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %err,
+                        "Transient read error inspecting Claude transcript; keeping session ID for resume"
+                    );
+                    Resumability::Resumable
+                }
+            }
+        }
+        AgentKind::Agy => {
+            if !is_uuid(session_id) {
+                return Resumability::NotResumable("invalid AGY UUID".to_string());
+            }
+            if agy_conversation_exists(session_id) {
+                Resumability::Resumable
+            } else {
+                Resumability::NotResumable(format!(
+                    "AGY conversation DB {session_id}.db not found"
+                ))
+            }
+        }
+        AgentKind::Codex | AgentKind::OpenCode => {
+            if session_id.trim().is_empty() {
+                Resumability::NotResumable("empty session id".to_string())
+            } else {
+                Resumability::Resumable
+            }
+        }
+        AgentKind::Shell => Resumability::NotResumable("shell session".to_string()),
+    }
 }
 
 /// Whether `session_id` points at a conversation the CLI can actually resume with content.
@@ -593,101 +668,85 @@ pub fn agent_session_is_resumable(
     profile: Option<&str>,
     session_id: &str,
 ) -> bool {
-    match kind {
-        AgentKind::Claude => {
-            is_uuid(session_id)
-                && find_claude_transcript(profile, session_id)
-                    .is_some_and(|p| claude_transcript_has_messages(&p))
-        }
-        AgentKind::Agy => {
-            is_uuid(session_id)
-                && agy_root()
-                    .map(|root| root.join("conversations").join(format!("{session_id}.db")))
-                    .is_some_and(|p| p.is_file())
-        }
-        AgentKind::Codex | AgentKind::OpenCode => !session_id.trim().is_empty(),
-        AgentKind::Shell => false,
-    }
+    matches!(
+        check_agent_session_resumable(kind, profile, session_id),
+        Resumability::Resumable
+    )
 }
 
-/// Discover the conversation that a Velox tab is currently driving, so that hibernating or
-/// closing the app can later resume exactly that one (`--resume` / `--conversation`).
-///
-/// Only conversations started in `cwd`, active since `started_after`, containing at least one user
-/// message and not already owned by another Velox tab (`claimed`) are considered.
-pub fn discover_agent_session_id(
-    kind: AgentKind,
-    profile: Option<&str>,
-    cwd: &str,
-    started_after: DateTime<Utc>,
-    claimed: &HashSet<String>,
-) -> Option<String> {
-    match kind {
-        AgentKind::Claude => {
-            let mut candidates: Vec<(SystemTime, String, PathBuf)> = Vec::new();
-            for dir in claude_project_dirs_for_cwd(profile, cwd) {
-                let Ok(files) = std::fs::read_dir(&dir) else {
-                    continue;
-                };
-                for entry in files.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                        continue;
-                    }
-                    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                        continue;
-                    };
-                    if !is_uuid(stem) || claimed.contains(stem) {
-                        continue;
-                    }
-                    let Some(modified) = entry.metadata().ok().and_then(|m| m.modified().ok())
-                    else {
-                        continue;
-                    };
-                    let mod_dt: DateTime<Utc> = modified.into();
-                    if mod_dt >= started_after {
-                        candidates.push((modified, stem.to_string(), path));
-                    }
-                }
-            }
-            candidates.sort_by_key(|c| std::cmp::Reverse(c.0));
-            candidates
-                .into_iter()
-                .find(|(_, _, path)| claude_transcript_has_messages(path))
-                .map(|(_, id, _)| id)
-        }
-        AgentKind::Agy => {
-            // history.jsonl records every prompt with its workspace and conversation ID, which is
-            // far more reliable than brain/ directory mtimes (those don't change on writes).
-            // A conversation belongs to the folder where it was first used; later entries from
-            // other folders only mean it was (wrongly) resumed there.
-            let root = agy_root()?;
-            let history = read_agy_history()?;
-            let origins = agy_origins(&history);
-            let want_cwd = normalize_path(cwd);
-            let min_ms = started_after.timestamp_millis();
-            for entry in history.iter().rev() {
-                if entry.timestamp_ms < min_ms {
-                    break;
-                }
-                let Some(conv) = entry.conversation_id.as_deref() else {
-                    continue;
-                };
-                if claimed.contains(conv) || origins.get(conv) != Some(&want_cwd) {
-                    continue;
-                }
-                if root
-                    .join("conversations")
-                    .join(format!("{conv}.db"))
-                    .is_file()
-                {
-                    return Some(conv.to_string());
-                }
-            }
-            None
-        }
-        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Shell => None,
+/// Live unlinked AGY tab eligible for unique Enter-timestamp matching against `history.jsonl`.
+#[derive(Debug, Clone)]
+pub struct AgyMatchCandidate {
+    pub velox_session_id: String,
+    pub started_at_ms: i64,
+    pub enter_timestamps_ms: Vec<i64>,
+}
+
+const AGY_ENTER_LOOKBACK_MS: i64 = 6_000;
+const AGY_ENTER_FUTURE_TOLERANCE_MS: i64 = 500;
+
+/// Pair unlinked live AGY tabs with `history.jsonl` prompts using the exact Enter timestamps Velox
+/// sent to each PTY. Assigns a conversation ID ONLY when **exactly one** candidate tab received
+/// Enter within `[-500ms, +6000ms]` before that prompt's `timestamp_ms`. Ambiguous simultaneous
+/// prompts across multiple tabs are left unassigned so the AGY hook resolves them safely.
+pub fn match_agy_history_entries(
+    history: &[AgyHistoryEntry],
+    unlinked_tabs: &[AgyMatchCandidate],
+    claimed_conv_ids: &HashSet<String>,
+    conv_exists: impl Fn(&str) -> bool,
+) -> HashMap<String, String> {
+    let mut assignments = HashMap::new();
+    if unlinked_tabs.is_empty() {
+        return assignments;
     }
+
+    let mut assigned_tabs: HashSet<&str> = HashSet::new();
+    let mut claimed: HashSet<String> = claimed_conv_ids.clone();
+
+    for entry in history.iter().rev() {
+        let Some(conv_id) = entry.conversation_id.as_deref() else {
+            continue;
+        };
+        if claimed.contains(conv_id) || !conv_exists(conv_id) {
+            continue;
+        }
+
+        let matching_tabs: Vec<&str> = unlinked_tabs
+            .iter()
+            .filter(|tab| !assigned_tabs.contains(tab.velox_session_id.as_str()))
+            .filter(|tab| {
+                tab.enter_timestamps_ms.iter().any(|&enter_ms| {
+                    enter_ms >= tab.started_at_ms - AGY_ENTER_FUTURE_TOLERANCE_MS
+                        && entry.timestamp_ms >= enter_ms - AGY_ENTER_FUTURE_TOLERANCE_MS
+                        && entry.timestamp_ms - enter_ms <= AGY_ENTER_LOOKBACK_MS
+                })
+            })
+            .map(|tab| tab.velox_session_id.as_str())
+            .collect();
+
+        if matching_tabs.len() == 1 {
+            let tab_id = matching_tabs[0];
+            assigned_tabs.insert(tab_id);
+            claimed.insert(conv_id.to_string());
+            assignments.insert(tab_id.to_string(), conv_id.to_string());
+        }
+    }
+
+    assignments
+}
+
+/// Convenience wrapper for matching unlinked live AGY tabs against `~/.gemini/antigravity-cli/history.jsonl`.
+pub fn match_live_agy_tabs_from_history(
+    unlinked_tabs: &[AgyMatchCandidate],
+    claimed_conv_ids: &HashSet<String>,
+) -> HashMap<String, String> {
+    if unlinked_tabs.is_empty() {
+        return HashMap::new();
+    }
+    let Some(history) = read_agy_history() else {
+        return HashMap::new();
+    };
+    match_agy_history_entries(&history, unlinked_tabs, claimed_conv_ids, agy_conversation_exists)
 }
 
 #[cfg(test)]
@@ -784,6 +843,78 @@ Do you trust the contents of this project?\n\
         assert_eq!(
             detect_screen_activity(AgentKind::Claude, osc, 80, 12),
             Some(AgentActivity::Working)
+        );
+    }
+
+    #[test]
+    fn agy_enter_matching_assigns_unique_candidate_and_skips_ambiguous_tabs() {
+        let conv1 = "11111111-1111-4111-8111-111111111111";
+        let conv2 = "22222222-2222-4222-8222-222222222222";
+        let conv_claimed = "33333333-3333-4333-8333-333333333333";
+
+        let history = vec![
+            AgyHistoryEntry {
+                timestamp_ms: 10_200,
+                workspace: r"d:\workspace".to_string(),
+                conversation_id: Some(conv1.to_string()),
+            },
+            AgyHistoryEntry {
+                timestamp_ms: 25_300,
+                workspace: r"d:\workspace\velox".to_string(),
+                conversation_id: Some(conv2.to_string()),
+            },
+            AgyHistoryEntry {
+                timestamp_ms: 40_100,
+                workspace: r"d:\workspace".to_string(),
+                conversation_id: Some(conv_claimed.to_string()),
+            },
+        ];
+
+        let tabs = vec![
+            AgyMatchCandidate {
+                velox_session_id: "agy-tab-1".to_string(),
+                started_at_ms: 9_000,
+                enter_timestamps_ms: vec![10_000],
+            },
+            AgyMatchCandidate {
+                velox_session_id: "agy-tab-2".to_string(),
+                started_at_ms: 9_000,
+                enter_timestamps_ms: vec![25_000],
+            },
+        ];
+
+        let mut claimed = HashSet::new();
+        claimed.insert(conv_claimed.to_string());
+
+        let matched = match_agy_history_entries(&history, &tabs, &claimed, |_| true);
+        assert_eq!(matched.get("agy-tab-1").map(String::as_str), Some(conv1));
+        assert_eq!(matched.get("agy-tab-2").map(String::as_str), Some(conv2));
+
+        // Simultaneous Enters within the same window are ambiguous: assign neither.
+        let ambiguous_tabs = vec![
+            AgyMatchCandidate {
+                velox_session_id: "agy-tab-a".to_string(),
+                started_at_ms: 9_000,
+                enter_timestamps_ms: vec![10_000],
+            },
+            AgyMatchCandidate {
+                velox_session_id: "agy-tab-b".to_string(),
+                started_at_ms: 9_000,
+                enter_timestamps_ms: vec![10_050],
+            },
+        ];
+        let ambiguous_history = vec![AgyHistoryEntry {
+            timestamp_ms: 10_250,
+            workspace: r"d:\workspace".to_string(),
+            conversation_id: Some(conv1.to_string()),
+        }];
+        let matched_ambiguous =
+            match_agy_history_entries(&ambiguous_history, &ambiguous_tabs, &HashSet::new(), |_| {
+                true
+            });
+        assert!(
+            matched_ambiguous.is_empty(),
+            "ambiguous simultaneous prompts must not guess tab ownership"
         );
     }
 }

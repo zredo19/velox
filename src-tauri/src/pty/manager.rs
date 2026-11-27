@@ -79,6 +79,9 @@ impl PtyManager {
         for (k, v) in &spec.env {
             cmd.env(k, v);
         }
+        if !spec.env.contains_key("VELOX_SESSION_ID") {
+            cmd.env("VELOX_SESSION_ID", session_id);
+        }
 
         // Ensure rich terminal capabilities for ConPTY agents
         cmd.env("TERM", "xterm-256color");

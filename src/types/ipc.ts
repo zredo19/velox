@@ -31,6 +31,7 @@ export interface SessionRecord {
   cwd: string;
   status: SessionStatus;
   agentSessionId: string | null;
+  previousAgentSessionIds?: string[];
   pid: number | null;
   memoryMb: number;
   createdAt: string;

@@ -225,6 +225,7 @@ fn make_session(id: &str, title: &str, shared: bool, status: SessionStatus) -> S
         cwd: r"D:\Workspace\velox".to_string(),
         status,
         agent_session_id: None,
+        previous_agent_session_ids: Vec::new(),
         wake_as_shell: false,
         pid: Some(1234),
         memory_mb: 120.0,
