@@ -10,6 +10,7 @@ Lightweight Rust Agentic Development Environment (ADE) desktop terminal built wi
 - **Zero Orphan Processes**: Every PTY and MCP backend runs inside a Windows Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) so closing or hibernating a session immediately cleans up its entire process tree.
 - **Embedded Scale-to-Zero Lazy MCP Gateway**: Native Rust Streamable HTTP MCP gateway (`127.0.0.1:43111`) with schema caching and per-backend idle teardown, plus live RAM/MCP drawer controls.
 - **Bounded Scrollback**: Fixed-capacity ring buffer (default `2 MB` per pane) with GPU-accelerated `xterm.js` WebGL rendering.
+- **Velox Online (team)**: Share sessions with teammates over Tailscale. They appear in the other Velox's sidebar under your name with a live, read-only terminal mirror, and anyone can send a session a task that its owner accepts or rejects. Agents get the same powers through the built-in `velox-team` MCP server (`team_list`, `team_send_task`, `team_task_status`, `team_read_session`), which also lets a lead agent coordinate other sessions on the same PC. Setup: [`docs/online/SETUP.md`](docs/online/SETUP.md) · design: [`docs/online/PLAN.md`](docs/online/PLAN.md).
 
 ## Download (Windows)
 

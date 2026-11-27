@@ -2,6 +2,24 @@
 
 Unos 10 minutos entre los dos. Se hace una sola vez.
 
+## 0. La versión nueva de Velox
+
+**Rodolfo:** cierra Velox y ábrelo con el acceso directo del escritorio (`Velox.lnk`, que apunta a
+`D:\Workspace\velox\src-tauri\target\release\velox.exe`, ya compilado con Velox Online). Tus
+sesiones vuelven dormidas, como siempre; con un clic retoman su conversación. El MCP
+`velox-team` ya quedó registrado en tus perfiles de Claude (`~/.claude`, `-personal`,
+`-trabajo`) y en agy.
+
+**Benjamín:** copia `velox.exe` (está en `D:\Workspace\velox-online\release\`) a su PC y ábrelo.
+Para que sus agentes puedan usar las herramientas del equipo, en PowerShell:
+
+```powershell
+claude mcp add --transport http --scope user velox-team http://127.0.0.1:43111/mcp/velox-team
+```
+
+En agy, agregar en `%USERPROFILE%\.gemini\antigravity-cli\mcp_config.json`, dentro de `mcpServers`:
+`"velox-team": { "serverUrl": "http://127.0.0.1:43111/mcp/velox-team" }`.
+
 ## 1. Tailscale
 
 **Rodolfo (dueño de la red, ya hecho):** Tailscale instalado, sesión con GitHub (`zredo19`),
@@ -68,6 +86,12 @@ escribe su correo → **Invite** (o **Copy invite link** y se lo mandas). El pla
   `team_list`, `team_send_task`, `team_task_status` y `team_read_session`. El agente líder reparte
   tareas con `team_send_task` y revisa el avance con `team_read_session`. Cada tarea que llega al
   otro PC la tiene que aceptar una persona; nunca se ejecuta sola.
+
+- **Un líder coordinando agentes en tu mismo PC (como herdr):** `team_send_task` sin `peer`
+  manda la tarea a una sesión local, y `team_read_session` sin `peer` lee su pantalla. Esto
+  funciona aunque el modo equipo esté apagado. Para que las tareas locales se entreguen sin
+  pedirte confirmación, activa en Ajustes → Team la opción **Auto-approve tasks from this PC**.
+  Las tareas que llegan de otro PC siempre necesitan tu Accept.
 
 ## Si algo no conecta
 
