@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Copy,
@@ -11,14 +11,18 @@ import {
   Search,
   Settings,
   Square,
+  Users,
   X,
 } from "lucide-react";
 import type {
   McpGatewaySnapshot,
   SessionRecord,
   SystemTelemetry,
+  TaskTicket,
+  TeamSnapshot,
 } from "../types/ipc";
 import { AgentIcon, VeloxLogo } from "./icons/AgentIcons";
+import { TeamTasksPopover } from "./team/TeamTasksPopover";
 
 export interface TitleBarProps {
   sidebarOpen: boolean;
@@ -36,6 +40,9 @@ export interface TitleBarProps {
   mcpDrawerOpen: boolean;
   onToggleMcpDrawer: () => void;
   onOpenSettings?: () => void;
+  team?: TeamSnapshot | null;
+  tasks?: TaskTicket[];
+  pendingIncomingCount?: number;
 }
 
 function getPathBasename(path: string): string {
@@ -66,8 +73,13 @@ export const TitleBar = memo(function TitleBar({
   mcpDrawerOpen,
   onToggleMcpDrawer,
   onOpenSettings,
+  team = null,
+  tasks = [],
+  pendingIncomingCount = 0,
 }: TitleBarProps) {
   const [maximized, setMaximized] = useState(false);
+  const [teamPopoverOpen, setTeamPopoverOpen] = useState(false);
+  const teamBtnRef = useRef<HTMLButtonElement | null>(null);
 
   const refreshMaximized = useCallback(async () => {
     try {
@@ -274,6 +286,51 @@ export const TitleBar = memo(function TitleBar({
               MCP {activeMcps}/{totalMcps}
             </span>
           </button>
+
+          {team?.enabled && (
+            <>
+              <button
+                ref={teamBtnRef}
+                type="button"
+                onClick={() => setTeamPopoverOpen((v) => !v)}
+                title={
+                  team.watchers.length > 0
+                    ? `Team tasks · ${team.watchers.length} watching (${team.watchers.join(", ")})`
+                    : "Team tasks"
+                }
+                aria-label="Toggle team tasks popover"
+                aria-expanded={teamPopoverOpen}
+                className={`h-6 px-2 flex items-center gap-1.5 rounded-md border text-[11.5px] font-mono tabular-nums transition-colors cursor-pointer ${
+                  teamPopoverOpen
+                    ? "bg-[var(--velox-active)] border-white/[0.14] text-[var(--velox-ink)]"
+                    : "bg-white/[0.03] border-white/[0.06] text-[var(--velox-ink-secondary)] hover:text-[var(--velox-ink)] hover:bg-[var(--velox-hover)]"
+                }`}
+              >
+                <Users className="w-3 h-3 text-[var(--velox-ink-muted)]" />
+                <span>
+                  {team.peers.filter((p) => p.online).length}/{team.peers.length}
+                </span>
+                {team.watchers.length > 0 && (
+                  <span className="text-[var(--velox-ink-muted)]">
+                    · {team.watchers.length} watching
+                  </span>
+                )}
+                {pendingIncomingCount > 0 && (
+                  <span className="px-1.5 py-0 rounded-full bg-amber-500/20 border border-amber-500/35 text-amber-300 text-[10.5px] leading-[15px]">
+                    {pendingIncomingCount}
+                  </span>
+                )}
+              </button>
+
+              <TeamTasksPopover
+                open={teamPopoverOpen}
+                onClose={() => setTeamPopoverOpen(false)}
+                team={team}
+                tasks={tasks}
+                anchorRef={teamBtnRef}
+              />
+            </>
+          )}
 
           <button
             type="button"

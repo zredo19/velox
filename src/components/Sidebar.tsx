@@ -6,15 +6,20 @@ import {
   Pencil,
   Play,
   Plus,
+  Radio,
   Search,
   Trash2,
   X,
 } from "lucide-react";
-import type { AgentKind, SessionRecord } from "../types/ipc";
+import type { AgentKind, SessionRecord, TeamSnapshot } from "../types/ipc";
 import type { AgentActivity } from "../lib/agentActivity";
 import { partitionSessions } from "../hooks/useSessions";
 import { AgentIcon } from "./icons/AgentIcons";
 import { AgentCrew } from "./icons/AgentCrew";
+import {
+  TeamSidebarSection,
+  type SelectedRemoteTarget,
+} from "./team/TeamSidebarSection";
 
 type SessionGroup = "awake" | "sleeping" | "exited";
 
@@ -25,7 +30,11 @@ export interface SidebarProps {
   /** What each awake agent is doing, read from its screen. */
   activity: Record<string, AgentActivity | null>;
   activeSessionId: string | null;
+  team?: TeamSnapshot | null;
+  selectedRemote?: SelectedRemoteTarget | null;
   onSelectSession: (id: string) => void;
+  onSelectRemote?: (target: SelectedRemoteTarget) => void;
+  onToggleShare?: (id: string, shared: boolean) => void;
   onWakeSession: (id: string) => void;
   onSleepSession: (id: string) => void;
   onCloseSession: (id: string) => void;
@@ -36,6 +45,7 @@ export interface SidebarProps {
   onSleepIdleSessions: () => void;
   onOpenLauncher: () => void;
   onLaunchAgentKind?: (kind: AgentKind) => void;
+  onOpenSettings?: () => void;
 }
 
 const ANIMATION_STEP_MS = 100;
@@ -82,7 +92,11 @@ export const Sidebar = memo(function Sidebar({
   sessions,
   activity,
   activeSessionId,
+  team = null,
+  selectedRemote = null,
   onSelectSession,
+  onSelectRemote,
+  onToggleShare,
   onWakeSession,
   onSleepSession,
   onCloseSession,
@@ -93,6 +107,7 @@ export const Sidebar = memo(function Sidebar({
   onSleepIdleSessions,
   onOpenLauncher,
   onLaunchAgentKind,
+  onOpenSettings,
 }: SidebarProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -384,6 +399,8 @@ export const Sidebar = memo(function Sidebar({
             }
             onSelectSession(id);
           }}
+          teamEnabled={Boolean(team?.enabled)}
+          onToggleShare={onToggleShare}
           onWake={onWakeSession}
           onSleep={onSleepSession}
           onClose={onCloseSession}
@@ -528,6 +545,13 @@ export const Sidebar = memo(function Sidebar({
             </button>
           </div>
         )}
+
+        <TeamSidebarSection
+          team={team}
+          selectedRemote={selectedRemote}
+          onSelectRemote={(target) => onSelectRemote?.(target)}
+          onOpenSettings={onOpenSettings}
+        />
       </div>
 
       {/* Rich context menu */}
@@ -655,6 +679,8 @@ interface SessionRowProps {
   onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   onContextMenu: (e: React.MouseEvent<HTMLDivElement>) => void;
   onSelect: (id: string) => void;
+  teamEnabled: boolean;
+  onToggleShare?: (id: string, shared: boolean) => void;
   onWake: (id: string) => void;
   onSleep: (id: string) => void;
   onClose: (id: string) => void;
@@ -678,6 +704,8 @@ const SessionRow = memo(function SessionRow({
   onPointerDown,
   onContextMenu,
   onSelect,
+  teamEnabled,
+  onToggleShare,
   onWake,
   onSleep,
   onClose,
@@ -828,9 +856,29 @@ const SessionRow = memo(function SessionRow({
         </div>
       </div>
 
-      {/* Right slot: RAM pill smoothly cross-fades to hover action buttons */}
-      <div className="relative shrink-0 flex items-center justify-end min-w-[46px] h-6">
-        <div className="flex items-center gap-1 transition-opacity duration-150 group-hover:opacity-0 group-hover:pointer-events-none">
+      {/* Right slot: RAM pill (default) swapped with action buttons on hover; share pin stays visible while shared */}
+      <div className="shrink-0 flex items-center justify-end gap-0.5 h-6">
+        {teamEnabled && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleShare?.(session.id, !session.shared);
+            }}
+            title={session.shared ? "Stop sharing" : "Share with team"}
+            aria-label={session.shared ? "Stop sharing" : "Share with team"}
+            aria-pressed={session.shared}
+            className={`h-6 w-6 items-center justify-center rounded transition-all active:scale-90 cursor-pointer ${
+              session.shared
+                ? "flex text-[var(--velox-accent-soft)] bg-[var(--velox-accent)]/15 hover:bg-[var(--velox-accent)]/25"
+                : "hidden group-hover:flex text-[var(--velox-ink-secondary)] hover:text-[var(--velox-ink)] hover:bg-white/[0.1]"
+            }`}
+          >
+            <Radio className="w-3 h-3" />
+          </button>
+        )}
+
+        <div className="flex items-center gap-1 group-hover:hidden">
           {shortcutIndex !== undefined && (
             <span className="text-[9.5px] font-mono text-[var(--velox-ink-faint)] opacity-0 group-focus-visible:opacity-100">
               ^{shortcutIndex}
@@ -845,7 +893,7 @@ const SessionRow = memo(function SessionRow({
           </span>
         </div>
 
-        <div className="absolute right-0 flex items-center gap-0.5 opacity-0 translate-x-1 pointer-events-none group-hover:opacity-100 group-hover:translate-x-0 group-hover:pointer-events-auto transition-all duration-150">
+        <div className="hidden group-hover:flex items-center gap-0.5">
           {isSleeping || session.status === "exited" ? (
             <button
               type="button"
