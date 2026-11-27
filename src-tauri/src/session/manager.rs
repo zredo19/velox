@@ -1,6 +1,6 @@
 use crate::domain::agent::{
-    build_default_presets, prepare_agent_profile, resolve_launch_spec, AgentKind, AgentLaunch,
-    AgentPreset, AgentSpawnSpec,
+    build_default_presets, prepare_agent_profile, resolve_launch_spec_with_context, AgentKind,
+    AgentLaunch, AgentPreset, AgentSpawnSpec, SessionLaunchContext,
 };
 use crate::domain::config::VeloxConfig;
 use crate::domain::error::{VeloxError, VeloxResult};
@@ -8,6 +8,7 @@ use crate::domain::session::{
     PtyOutputEvent, ScrollbackSnapshot, SessionRecord, SessionStatus, SessionUpdatedEvent,
 };
 use crate::pty::manager::{ExitCallback, OutputCallback, PtyManager, StreamPos};
+use crate::session::bootstrap::velox_cli_bin_dir;
 use crate::session::detector::{
     agent_session_belongs_to_cwd, agent_session_is_resumable, detect_status_from_output,
     discover_agent_session_id, recover_agent_session_id,
@@ -44,6 +45,8 @@ pub struct SessionManager {
     pty_sizes: Arc<Mutex<HashMap<String, (u16, u16)>>>,
     /// Optional tap receiving live PTY output and resize events.
     tap: Arc<RwLock<Option<Arc<dyn SessionTap>>>>,
+    /// Tauri application handle used by headless subsystems (e.g. direct local messaging wake).
+    app_handle: RwLock<Option<AppHandle>>,
     /// Serializes the decision part of create/wake/sleep/close now that those commands run
     /// off the main thread (they used to be serialized by it).
     lifecycle: Mutex<()>,
@@ -77,8 +80,55 @@ impl SessionManager {
             pending_sizes: Arc::new(Mutex::new(HashMap::new())),
             pty_sizes: Arc::new(Mutex::new(HashMap::new())),
             tap: Arc::new(RwLock::new(None)),
+            app_handle: RwLock::new(None),
             lifecycle: Mutex::new(()),
         }
+    }
+
+    /// Registers the Tauri app handle so non-IPC subsystems can wake sleeping sessions.
+    pub fn set_app_handle(&self, app: AppHandle) {
+        *self.app_handle.write().unwrap_or_else(|e| e.into_inner()) = Some(app);
+    }
+
+    /// Wakes a sleeping or exited session using the stored `AppHandle`.
+    pub fn wake_session_headless(
+        &self,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> VeloxResult<SessionRecord> {
+        let app = self
+            .app_handle
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or_else(|| {
+                VeloxError::InvalidInput("Application handle is not initialized yet".to_string())
+            })?;
+        self.wake_session(&app, session_id, cols, rows)
+    }
+
+    fn build_launch_spec(
+        &self,
+        preset: &AgentPreset,
+        cwd: &Path,
+        launch: AgentLaunch<'_>,
+        session_id: &str,
+        session_title: &str,
+    ) -> AgentSpawnSpec {
+        let gateway_url = {
+            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+            (cfg.mcp_gateway_enabled && cfg.mcp_gateway_port > 0)
+                .then(|| format!("http://127.0.0.1:{}", cfg.mcp_gateway_port))
+        };
+        let cli_bin_dir = velox_cli_bin_dir();
+        let ctx = SessionLaunchContext {
+            session_id,
+            session_title,
+            gateway_url: gateway_url.as_deref(),
+            cli_bin_dir: Some(&cli_bin_dir),
+        };
+        resolve_launch_spec_with_context(preset, cwd, launch, Some(&ctx))
     }
 
     /// Registers a tap that receives live PTY output and resize notifications.
@@ -350,7 +400,13 @@ impl SessionManager {
             Some(id) => AgentLaunch::NewWithId(id),
             None => AgentLaunch::Fresh,
         };
-        let spec = resolve_launch_spec(&preset, Path::new(&resolved_cwd), launch);
+        let spec = self.build_launch_spec(
+            &preset,
+            Path::new(&resolved_cwd),
+            launch,
+            &session_id,
+            &record.title,
+        );
 
         // The tab is returned right away in `Starting`; the slow part (credential swap, ConPTY
         // spawn) finishes in the background and is announced with `session-updated`.
@@ -611,7 +667,13 @@ impl SessionManager {
             .unwrap_or_else(|e| e.into_inner())
             .insert(session_id.to_string(), Instant::now());
 
-        let spec = resolve_launch_spec(&preset, Path::new(&existing.cwd), launch);
+        let spec = self.build_launch_spec(
+            &preset,
+            Path::new(&existing.cwd),
+            launch,
+            session_id,
+            &existing.title,
+        );
 
         // Claim the conversation ID now (so a parallel wake sees it) and show the tab as
         // Starting; the spawn itself finishes in the background.

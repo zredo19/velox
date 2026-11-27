@@ -387,11 +387,75 @@ pub enum AgentLaunch<'a> {
     Resume(&'a str),
 }
 
+/// Per-session environment and prompt context injected when Velox spawns a PTY.
+#[derive(Debug, Clone, Default)]
+pub struct SessionLaunchContext<'a> {
+    pub session_id: &'a str,
+    pub session_title: &'a str,
+    pub gateway_url: Option<&'a str>,
+    pub cli_bin_dir: Option<&'a Path>,
+}
+
+/// Prepend `bin_dir` to `PATH` inside `env` without duplicating it if already present.
+pub fn prepend_path_env(env: &mut HashMap<String, String>, bin_dir: &Path) {
+    let existing_os = env
+        .remove("PATH")
+        .or_else(|| env.remove("Path"))
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
+
+    let mut paths: Vec<PathBuf> = vec![bin_dir.to_path_buf()];
+    if let Some(raw) = existing_os {
+        let target_norm = bin_dir
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_ascii_lowercase();
+        for p in std::env::split_paths(&raw) {
+            let p_norm = p
+                .to_string_lossy()
+                .trim_end_matches(['\\', '/'])
+                .to_ascii_lowercase();
+            if p_norm.is_empty() || p_norm != target_norm {
+                paths.push(p);
+            }
+        }
+    }
+
+    if let Ok(joined) = std::env::join_paths(paths) {
+        env.insert("PATH".to_string(), joined.to_string_lossy().into_owned());
+    } else {
+        env.insert("PATH".to_string(), bin_dir.to_string_lossy().into_owned());
+    }
+}
+
+/// System prompt addendum injected for Claude Code sessions running inside Velox.
+pub fn claude_session_system_prompt(session_id: &str, session_title: &str) -> String {
+    let short_id: String = session_id.chars().take(8).collect();
+    format!(
+        "You are running inside a Velox session tab titled \"{session_title}\" (VELOX_SESSION_ID={session_id}, short id {short_id}). \
+        To collaborate with other local Velox sessions on this PC: run `velox list` to list sessions, \
+        `velox msg \"<session>\" \"<text>\"` to send a direct message without manual approval (or use `velox-team` MCP tools `session_list` and `session_send`), \
+        and `velox read \"<session>\" [lines]` to inspect another session's terminal output. \
+        When the user asks you to use Velox to talk to another session (for example \"usa velox para hablarle a X\"), run `velox list` and `velox msg` right away without asking for confirmation. \
+        Incoming messages starting with `[Velox · mensaje de ...]` come from another Velox session; reply to them with `velox msg`."
+    )
+}
+
 /// Like [`resolve_spawn_spec`] but with an explicit launch mode.
 pub fn resolve_launch_spec(
     preset: &AgentPreset,
     cwd: &Path,
     launch: AgentLaunch<'_>,
+) -> AgentSpawnSpec {
+    resolve_launch_spec_with_context(preset, cwd, launch, None)
+}
+
+/// Like [`resolve_launch_spec`] with optional per-session Velox messaging identity and CLI PATH.
+pub fn resolve_launch_spec_with_context(
+    preset: &AgentPreset,
+    cwd: &Path,
+    launch: AgentLaunch<'_>,
+    ctx: Option<&SessionLaunchContext<'_>>,
 ) -> AgentSpawnSpec {
     let mut agent_args = preset.args.clone();
     let mut env = preset.env.clone();
@@ -432,6 +496,34 @@ pub fn resolve_launch_spec(
                 agent_args.push(session_id.to_string());
             }
             AgentKind::Shell => {}
+        }
+    }
+
+    if let Some(session_ctx) = ctx {
+        if !session_ctx.session_id.trim().is_empty() {
+            env.insert(
+                "VELOX_SESSION_ID".to_string(),
+                session_ctx.session_id.to_string(),
+            );
+        }
+        if !session_ctx.session_title.trim().is_empty() {
+            env.insert(
+                "VELOX_SESSION_TITLE".to_string(),
+                session_ctx.session_title.to_string(),
+            );
+        }
+        if let Some(url) = session_ctx.gateway_url.filter(|u| !u.trim().is_empty()) {
+            env.insert("VELOX_GATEWAY_URL".to_string(), url.to_string());
+        }
+        if let Some(bin_dir) = session_ctx.cli_bin_dir {
+            prepend_path_env(&mut env, bin_dir);
+        }
+        if preset.kind == AgentKind::Claude && !session_ctx.session_id.trim().is_empty() {
+            agent_args.push("--append-system-prompt".to_string());
+            agent_args.push(claude_session_system_prompt(
+                session_ctx.session_id,
+                session_ctx.session_title,
+            ));
         }
     }
 
@@ -635,5 +727,53 @@ mod tests {
                 Some("true")
             );
         }
+    }
+
+    #[test]
+    fn resolve_launch_spec_with_context_injects_env_and_claude_prompt() {
+        let bin_dir = PathBuf::from(r"C:\Users\Test\AppData\Local\velox\bin");
+        let ctx = SessionLaunchContext {
+            session_id: "12345678-aaaa-bbbb-cccc-1234567890ab",
+            session_title: "Backend Worker",
+            gateway_url: Some("http://127.0.0.1:43111"),
+            cli_bin_dir: Some(bin_dir.as_path()),
+        };
+
+        let claude = sample_preset(AgentKind::Claude, "claude.exe");
+        let spec = resolve_launch_spec_with_context(
+            &claude,
+            Path::new("."),
+            AgentLaunch::Resume("conv-1"),
+            Some(&ctx),
+        );
+        assert_eq!(
+            spec.env.get("VELOX_SESSION_ID").map(String::as_str),
+            Some("12345678-aaaa-bbbb-cccc-1234567890ab")
+        );
+        assert_eq!(
+            spec.env.get("VELOX_SESSION_TITLE").map(String::as_str),
+            Some("Backend Worker")
+        );
+        assert_eq!(
+            spec.env.get("VELOX_GATEWAY_URL").map(String::as_str),
+            Some("http://127.0.0.1:43111")
+        );
+        let path_val = spec.env.get("PATH").expect("PATH injected");
+        let entries: Vec<_> = std::env::split_paths(path_val).collect();
+        assert_eq!(entries.first(), Some(&bin_dir));
+        let script = decoded_ps_script(&spec);
+        assert!(script.contains("'--resume' 'conv-1'"));
+        assert!(script.contains("'--append-system-prompt'"));
+        assert!(script.contains("Backend Worker"));
+        assert!(script.contains("velox msg"));
+
+        let agy = sample_preset(AgentKind::Agy, "agy.exe");
+        let agy_spec =
+            resolve_launch_spec_with_context(&agy, Path::new("."), AgentLaunch::Fresh, Some(&ctx));
+        assert_eq!(
+            agy_spec.env.get("VELOX_SESSION_ID").map(String::as_str),
+            Some("12345678-aaaa-bbbb-cccc-1234567890ab")
+        );
+        assert!(!decoded_ps_script(&agy_spec).contains("--append-system-prompt"));
     }
 }

@@ -55,6 +55,7 @@ pub fn run() {
 
     let config = VeloxConfig::load_or_default();
     let mcp_enabled = config.mcp_gateway_enabled;
+    let mcp_port = config.mcp_gateway_port;
     let state = AppState::new(config);
     let state_for_exit = state.clone();
 
@@ -98,7 +99,13 @@ pub fn run() {
 
             let tap: Arc<dyn SessionTap> = setup_state.team.clone();
             setup_state.sessions.set_tap(tap);
+            setup_state.sessions.set_app_handle(handle.clone());
             setup_state.team.start(handle.clone());
+
+            let bootstrap_port = if mcp_enabled { mcp_port } else { 0 };
+            tauri::async_runtime::spawn_blocking(move || {
+                session::bootstrap::bootstrap_local_messaging(bootstrap_port);
+            });
 
             // Boot embedded Lazy MCP Gateway if enabled
             if mcp_enabled {

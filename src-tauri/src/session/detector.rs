@@ -11,6 +11,345 @@ use std::time::SystemTime;
 static ANSI_RE: OnceLock<Option<Regex>> = OnceLock::new();
 static UUID_RE: OnceLock<Option<Regex>> = OnceLock::new();
 
+const MAX_ACTIVITY_SCROLLBACK_BYTES: usize = 256 * 1024;
+
+/// Live activity state read from an agent's rendered ConPTY screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentActivity {
+    Working,
+    Blocked,
+    Idle,
+}
+
+fn compiled_regex(cell: &'static OnceLock<Option<Regex>>, pattern: &str) -> Option<&'static Regex> {
+    cell.get_or_init(|| Regex::new(pattern).ok()).as_ref()
+}
+
+fn matches_re(cell: &'static OnceLock<Option<Regex>>, pattern: &str, text: &str) -> bool {
+    compiled_regex(cell, pattern).is_some_and(|re| re.is_match(text))
+}
+
+fn join_lower(lines: &[&str]) -> String {
+    lines.join("\n").to_lowercase()
+}
+
+fn has_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|n| text.contains(n))
+}
+
+/// Extracts the latest OSC window title (`ESC ] 0; ...` or `ESC ] 2; ...`) from raw PTY bytes.
+pub fn last_osc_title(raw: &[u8]) -> String {
+    let mut latest = String::new();
+    let mut i = 0;
+    while i + 4 <= raw.len() {
+        if raw[i] == 0x1b && raw[i + 1] == b']' && (raw[i + 2] == b'0' || raw[i + 2] == b'2') && raw[i + 3] == b';' {
+            let start = i + 4;
+            let mut end = start;
+            let mut next_i = raw.len();
+            while end < raw.len() && end - start <= 512 {
+                if raw[end] == 0x07 {
+                    next_i = end + 1;
+                    break;
+                }
+                if raw[end] == 0x1b && end + 1 < raw.len() && raw[end + 1] == b'\\' {
+                    next_i = end + 2;
+                    break;
+                }
+                end += 1;
+            }
+            if next_i <= raw.len() && end > start {
+                latest = String::from_utf8_lossy(&raw[start..end]).into_owned();
+            }
+            i = next_i.min(raw.len());
+            continue;
+        }
+        i += 1;
+    }
+    latest
+}
+
+/// Renders visible terminal viewport lines for `raw_scrollback` via `vt100`.
+pub fn render_screen_lines(raw_scrollback: &[u8], cols: u16, rows: u16) -> Vec<String> {
+    let tail = if raw_scrollback.len() > MAX_ACTIVITY_SCROLLBACK_BYTES {
+        &raw_scrollback[raw_scrollback.len() - MAX_ACTIVITY_SCROLLBACK_BYTES..]
+    } else {
+        raw_scrollback
+    };
+    let cols = cols.max(10);
+    let rows = rows.max(2);
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    parser.process(tail);
+    parser
+        .screen()
+        .rows(0, cols)
+        .map(|row| row.trim_end().to_string())
+        .collect()
+}
+
+fn detect_claude_activity(title: &str, lines: &[String]) -> Option<AgentActivity> {
+    static BUSY_TITLE: OnceLock<Option<Regex>> = OnceLock::new();
+    static IDLE_TITLE: OnceLock<Option<Regex>> = OnceLock::new();
+    static INTERRUPT_LINE: OnceLock<Option<Regex>> = OnceLock::new();
+    static SPINNER_LINE: OnceLock<Option<Regex>> = OnceLock::new();
+    static BG_SHELLS: OnceLock<Option<Regex>> = OnceLock::new();
+    static BG_AGENTS: OnceLock<Option<Regex>> = OnceLock::new();
+    static HORIZ_RULE: OnceLock<Option<Regex>> = OnceLock::new();
+    static BOX_PROMPT: OnceLock<Option<Regex>> = OnceLock::new();
+    static EMPTY_PROMPT: OnceLock<Option<Regex>> = OnceLock::new();
+    static PROCEED_CHOICE: OnceLock<Option<Regex>> = OnceLock::new();
+
+    const P_BUSY_TITLE: &str = r"^[\u{2800}-\u{28ff}\u{25d0}-\u{25d3}] ";
+    const P_IDLE_TITLE: &str = r"^✳ ";
+    const P_INTERRUPT: &str = r"^\s*[⏸⏵].*esc to interrupt(?:\s|·|$)";
+    const P_SPINNER: &str = r"^\s*[*·✢✶✻✽]\s+\S.*…(?:\s+\(\d+[smh](?:\s|·)|\s*$)";
+    const P_BG_SHELLS: &str = r"^\s*[⏸⏵].*·\s+[1-9]\d*\s+shells?\s+(?:·|$)";
+    const P_BG_AGENTS: &str = r"^\s*[*·✢✶✻✽]\s+Waiting for [1-9]\d* background agents? to finish\s*$";
+    const P_HORIZ_RULE: &str = r"^\s*[─━]{8,}";
+    const P_BOX_PROMPT: &str = r"^\s*[❯>]";
+    const P_EMPTY_PROMPT: &str = r"^\s*❯\s*$";
+    const P_PROCEED_CHOICE: &str = r"(?im)^\s*❯?\s*\d\.\s*(?:yes|no)\b";
+
+    let filled: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let rules: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| matches_re(&HORIZ_RULE, P_HORIZ_RULE, l).then_some(i))
+        .collect();
+    let footer_slice: Vec<&str> = if let Some(&last_rule) = rules.last() {
+        lines[last_rule + 1..].iter().map(String::as_str).collect()
+    } else {
+        lines.iter().map(String::as_str).collect()
+    };
+    let footer = join_lower(&footer_slice);
+    let all_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let screen = join_lower(&all_refs);
+
+    let last_three = &filled[filled.len().saturating_sub(3)..];
+    if join_lower(last_three).contains("showing detailed transcript") {
+        return None;
+    }
+
+    if footer.contains("esc to cancel")
+        && (footer.contains("enter to confirm")
+            || (footer.contains("enter to select")
+                && has_any(
+                    &footer,
+                    &[
+                        "arrow keys",
+                        "arrows to navigate",
+                        "↑/↓ to navigate",
+                        "↑↓ to navigate",
+                    ],
+                )))
+    {
+        return Some(AgentActivity::Blocked);
+    }
+
+    if matches_re(&BUSY_TITLE, P_BUSY_TITLE, title) {
+        return Some(AgentActivity::Working);
+    }
+    let recent = &filled[filled.len().saturating_sub(12)..];
+    if recent.iter().any(|l| {
+        matches_re(&INTERRUPT_LINE, P_INTERRUPT, l) || matches_re(&SPINNER_LINE, P_SPINNER, l)
+    }) {
+        return Some(AgentActivity::Working);
+    }
+    let last_five = &filled[filled.len().saturating_sub(5)..];
+    if last_five
+        .iter()
+        .any(|l| matches_re(&BG_SHELLS, P_BG_SHELLS, l))
+    {
+        return Some(AgentActivity::Working);
+    }
+    if recent
+        .iter()
+        .any(|l| matches_re(&BG_AGENTS, P_BG_AGENTS, l))
+    {
+        return Some(AgentActivity::Working);
+    }
+
+    if rules.len() >= 2 {
+        let start = rules[rules.len() - 2] + 1;
+        let end = rules[rules.len() - 1];
+        if start < end
+            && lines[start..end]
+                .iter()
+                .any(|l| matches_re(&BOX_PROMPT, P_BOX_PROMPT, l))
+        {
+            return Some(AgentActivity::Idle);
+        }
+    }
+
+    if screen.contains("do you want to proceed?")
+        && matches_re(&PROCEED_CHOICE, P_PROCEED_CHOICE, &screen)
+    {
+        return Some(AgentActivity::Blocked);
+    }
+
+    if !lines
+        .iter()
+        .any(|l| matches_re(&EMPTY_PROMPT, P_EMPTY_PROMPT, l))
+        && (has_any(
+            &screen,
+            &[
+                "waiting for permission",
+                "do you want to allow this connection?",
+                "tab to amend",
+                "ctrl+e to explain",
+                "review your answers",
+                "skip interview and plan immediately",
+            ],
+        ) || (has_any(&screen, &["do you want to", "would you like to"])
+            && has_any(&screen, &["yes", "❯"])))
+    {
+        return Some(AgentActivity::Blocked);
+    }
+
+    if matches_re(&IDLE_TITLE, P_IDLE_TITLE, title) {
+        Some(AgentActivity::Idle)
+    } else {
+        None
+    }
+}
+
+fn detect_agy_activity(lines: &[String]) -> AgentActivity {
+    static AGY_SPINNER: OnceLock<Option<Regex>> = OnceLock::new();
+    static AGY_BG_TASKS: OnceLock<Option<Regex>> = OnceLock::new();
+    static AGY_NAV_CONFIRM: OnceLock<Option<Regex>> = OnceLock::new();
+
+    const P_SPINNER: &str = r"(?u)^\s*[\u{2800}-\u{28ff}]+\s+\p{L}+ing\b";
+    const P_BG_TASKS: &str = r"(?i)·\s*[1-9]\d*\s+task";
+    const P_NAV_CONFIRM: &str = r"navigate.*enter\s+(?:to\s+)?(?:confirm|select)";
+
+    let all_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let screen = join_lower(&all_refs);
+    let filled: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let bottom = &filled[filled.len().saturating_sub(5)..];
+    let bottom_lower = join_lower(bottom);
+
+    if screen.contains("requesting permission for:")
+        && has_any(
+            &screen,
+            &["do you want to proceed?", "tab amend", "edit command"],
+        )
+    {
+        return AgentActivity::Blocked;
+    }
+    if matches_re(&AGY_NAV_CONFIRM, P_NAV_CONFIRM, &bottom_lower) {
+        return AgentActivity::Blocked;
+    }
+    if lines
+        .iter()
+        .any(|l| matches_re(&AGY_SPINNER, P_SPINNER, l))
+    {
+        return AgentActivity::Working;
+    }
+    if bottom
+        .iter()
+        .any(|l| matches_re(&AGY_BG_TASKS, P_BG_TASKS, l))
+    {
+        AgentActivity::Working
+    } else {
+        AgentActivity::Idle
+    }
+}
+
+/// Classifies agent activity directly from rendered terminal lines and window title.
+pub fn detect_activity_from_lines(
+    kind: AgentKind,
+    title: &str,
+    lines: &[String],
+) -> Option<AgentActivity> {
+    match kind {
+        AgentKind::Claude => detect_claude_activity(title, lines),
+        AgentKind::Agy => Some(detect_agy_activity(lines)),
+        AgentKind::Shell => Some(AgentActivity::Idle),
+        AgentKind::Codex | AgentKind::OpenCode => {
+            let filled: Vec<&str> = lines
+                .iter()
+                .map(String::as_str)
+                .filter(|l| !l.trim().is_empty())
+                .collect();
+            let bottom = join_lower(&filled[filled.len().saturating_sub(8)..]);
+            if has_any(&bottom, &["permission required", "allow command?", "[y/n]"]) {
+                Some(AgentActivity::Blocked)
+            } else if has_any(&bottom, &["esc interrupt", "esc to interrupt"]) {
+                Some(AgentActivity::Working)
+            } else {
+                Some(AgentActivity::Idle)
+            }
+        }
+    }
+}
+
+/// Renders raw ConPTY scrollback through `vt100` and classifies current agent activity.
+pub fn detect_screen_activity(
+    kind: AgentKind,
+    raw_scrollback: &[u8],
+    cols: u16,
+    rows: u16,
+) -> Option<AgentActivity> {
+    let title = last_osc_title(raw_scrollback);
+    let lines = render_screen_lines(raw_scrollback, cols, rows);
+    detect_activity_from_lines(kind, &title, &lines)
+}
+
+/// Returns `true` when the agent inside a PTY is ready to accept direct prompt input
+/// (TUI/shell prompt is mounted and not blocked on a permission/selection prompt).
+pub fn is_agent_ready_for_input(
+    kind: AgentKind,
+    raw_scrollback: &[u8],
+    cols: u16,
+    rows: u16,
+) -> bool {
+    static HORIZ_RULE: OnceLock<Option<Regex>> = OnceLock::new();
+    const P_HORIZ_RULE: &str = r"^\s*[─━]{8,}";
+
+    let title = last_osc_title(raw_scrollback);
+    let lines = render_screen_lines(raw_scrollback, cols, rows);
+    let activity = detect_activity_from_lines(kind, &title, &lines);
+    if activity == Some(AgentActivity::Blocked) {
+        return false;
+    }
+
+    match kind {
+        AgentKind::Shell => lines.iter().any(|l| !l.trim().is_empty()),
+        AgentKind::Claude => matches!(
+            activity,
+            Some(AgentActivity::Idle | AgentActivity::Working)
+        ),
+        AgentKind::Agy => {
+            let has_rule = lines
+                .iter()
+                .any(|l| matches_re(&HORIZ_RULE, P_HORIZ_RULE, l));
+            let has_agy_cue = lines.iter().any(|l| {
+                let t = l.trim();
+                t == ">"
+                    || t.starts_with("> ")
+                    || l.contains("Antigravity")
+                    || l.contains("Gemini")
+            });
+            has_rule && has_agy_cue
+        }
+        AgentKind::Codex | AgentKind::OpenCode => lines.iter().any(|l| {
+            let t = l.trim();
+            t.starts_with('›')
+                || t == ">"
+                || t.starts_with("> ")
+                || l.to_ascii_lowercase().contains("ask anything")
+                || matches_re(&HORIZ_RULE, P_HORIZ_RULE, l)
+        }),
+    }
+}
+
 fn ansi_regex() -> Option<&'static Regex> {
     ANSI_RE
         .get_or_init(|| {
@@ -394,6 +733,57 @@ mod tests {
         assert_eq!(
             detect_status_from_output(AgentKind::Claude, b"Compiling velox v0.1.0"),
             Some(SessionStatus::Running)
+        );
+    }
+
+    #[test]
+    fn detect_screen_activity_handles_claude_and_agy_states() {
+        let claude_ready = "\
+─────────────\n\
+❯ \n\
+─────────────\n\
+  bypass permissions on\n";
+        let raw_claude_idle = claude_ready.as_bytes();
+        assert_eq!(
+            detect_screen_activity(AgentKind::Claude, raw_claude_idle, 80, 12),
+            Some(AgentActivity::Idle)
+        );
+        assert!(is_agent_ready_for_input(AgentKind::Claude, raw_claude_idle, 80, 12));
+
+        let agy_ps_boot = b"Windows PowerShell\r\nPS D:\\Workspace\\velox> ";
+        assert!(!is_agent_ready_for_input(AgentKind::Agy, agy_ps_boot, 100, 24));
+
+        let agy_ready = "\
+        Antigravity CLI 1.5.3\n\
+────────────────────────────────────────────────────────────\n\
+>\n\
+────────────────────────────────────────────────────────────\n";
+        assert_eq!(
+            detect_screen_activity(AgentKind::Agy, agy_ready.as_bytes(), 100, 24),
+            Some(AgentActivity::Idle)
+        );
+        assert!(is_agent_ready_for_input(AgentKind::Agy, agy_ready.as_bytes(), 100, 24));
+
+        let agy_trust_blocked = "\
+Do you trust the contents of this project?\n\
+> Yes, I trust this folder\n\
+  ↑/↓ Navigate · enter Confirm\n";
+        assert_eq!(
+            detect_screen_activity(AgentKind::Agy, agy_trust_blocked.as_bytes(), 100, 24),
+            Some(AgentActivity::Blocked)
+        );
+        assert!(!is_agent_ready_for_input(
+            AgentKind::Agy,
+            agy_trust_blocked.as_bytes(),
+            100,
+            24
+        ));
+
+        let osc = b"\x1b]0;\xe2\xa0\x8b Working\x07";
+        assert_eq!(last_osc_title(osc), "⠋ Working");
+        assert_eq!(
+            detect_screen_activity(AgentKind::Claude, osc, 80, 12),
+            Some(AgentActivity::Working)
         );
     }
 }

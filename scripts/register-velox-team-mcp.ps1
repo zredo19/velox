@@ -65,26 +65,36 @@ if (-not $claudeCmd) {
             }
 
             $alreadyRegistered = $false
+            $hasSessionHeader = $false
             try {
-                $null = & $claudeCmd.Source mcp get velox-team 2>&1
+                $existingInfo = (& $claudeCmd.Source mcp get velox-team 2>&1) -join "`n"
                 if ($LASTEXITCODE -eq 0) {
                     $alreadyRegistered = $true
+                    if ($existingInfo -match "X-Velox-Session" -and $existingInfo -match [regex]::Escape($url)) {
+                        $hasSessionHeader = $true
+                    }
                 }
             } catch {
                 $alreadyRegistered = $false
             }
 
-            if ($alreadyRegistered) {
-                Write-Host "[SKIP] Claude ($($target.Label)): velox-team already registered."
+            if ($alreadyRegistered -and $hasSessionHeader) {
+                Write-Host "[SKIP] Claude ($($target.Label)): velox-team already registered with X-Velox-Session header."
                 continue
             }
 
             if ($DryRun) {
                 $dirDisplay = if ($null -eq $target.ConfigDir) { "<unset>" } else { $target.ConfigDir }
-                Write-Host "[DRY-RUN] Claude ($($target.Label)): would run 'claude mcp add --transport http --scope user velox-team $url' with CLAUDE_CONFIG_DIR=$dirDisplay"
+                $action = if ($alreadyRegistered) { "update" } else { "register" }
+                Write-Host "[DRY-RUN] Claude ($($target.Label)): would $action velox-team -> $url with X-Velox-Session header (CLAUDE_CONFIG_DIR=$dirDisplay)"
             } else {
-                Write-Host "[ADD] Claude ($($target.Label)): registering velox-team..."
-                & $claudeCmd.Source mcp add --transport http --scope user velox-team $url
+                if ($alreadyRegistered) {
+                    Write-Host "[UPDATE] Claude ($($target.Label)): refreshing velox-team with X-Velox-Session header..."
+                    & $claudeCmd.Source mcp remove --scope user velox-team 2>&1 | Out-Null
+                } else {
+                    Write-Host "[ADD] Claude ($($target.Label)): registering velox-team..."
+                }
+                & $claudeCmd.Source mcp add --transport http --scope user --header 'X-Velox-Session: ${VELOX_SESSION_ID:-}' velox-team $url
                 if ($LASTEXITCODE -ne 0) {
                     throw "claude mcp add failed for $($target.Label) with exit code $LASTEXITCODE"
                 }
@@ -102,6 +112,11 @@ if (-not $claudeCmd) {
 # --- 2. Antigravity CLI (AGY) mcp_config.json files --------------------------
 $agyBase = Join-Path $homeDir ".gemini\antigravity-cli"
 $agyConfigs = @()
+
+$v2AgyConfig = Join-Path $homeDir ".gemini\config\mcp_config.json"
+if (Test-Path -LiteralPath $v2AgyConfig -PathType Leaf) {
+    $agyConfigs += $v2AgyConfig
+}
 
 $rootAgyConfig = Join-Path $agyBase "mcp_config.json"
 if (Test-Path -LiteralPath $rootAgyConfig -PathType Leaf) {
