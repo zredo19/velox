@@ -10,6 +10,12 @@ import type {
   SessionSpawnFailedEvent,
   SessionUpdatedEvent,
   SystemTelemetry,
+  TaskTicket,
+  TeamPtyOutputEvent,
+  TeamPtyResizeEvent,
+  TeamPtySnapshotEvent,
+  TeamSessionGoneEvent,
+  TeamSnapshot,
   VeloxConfig,
 } from "../types/ipc";
 
@@ -140,6 +146,15 @@ function createDevMockApi() {
       "C:\\Users\\dev\\Projects\\api-gateway",
       "C:\\Users\\dev\\Projects\\design-system",
     ],
+    team: {
+      enabled: false,
+      displayName: "Dev",
+      listenPort: 43120,
+      bindHost: "",
+      token: "",
+      autoApproveLocal: true,
+      peers: [],
+    },
   };
 
   let sessions: SessionRecord[] = [
@@ -158,6 +173,7 @@ function createDevMockApi() {
       createdAt: now,
       lastActiveAt: now,
       exitCode: null,
+      shared: false,
     },
     {
       id: "demo-agy",
@@ -174,6 +190,7 @@ function createDevMockApi() {
       createdAt: now,
       lastActiveAt: now,
       exitCode: null,
+      shared: false,
     },
     {
       id: "demo-codex",
@@ -190,6 +207,7 @@ function createDevMockApi() {
       createdAt: now,
       lastActiveAt: now,
       exitCode: null,
+      shared: false,
     },
     {
       id: "demo-opencode",
@@ -206,6 +224,7 @@ function createDevMockApi() {
       createdAt: now,
       lastActiveAt: now,
       exitCode: null,
+      shared: false,
     },
     {
       id: "demo-sleep-1",
@@ -222,6 +241,7 @@ function createDevMockApi() {
       createdAt: now,
       lastActiveAt: now,
       exitCode: null,
+      shared: false,
     },
   ];
 
@@ -344,6 +364,7 @@ function createDevMockApi() {
         createdAt: new Date().toISOString(),
         lastActiveAt: new Date().toISOString(),
         exitCode: null,
+        shared: false,
       };
       sessions = [...sessions, created];
       return created;
@@ -454,6 +475,52 @@ function createDevMockApi() {
       config = { ...next };
       return { ...config };
     },
+    getTeamStatus: async (): Promise<TeamSnapshot> => ({
+      enabled: config.team.enabled,
+      displayName: config.team.displayName,
+      listenAddr: null,
+      serverError: null,
+      tailscaleIp: null,
+      peers: [],
+      localSessions: [],
+      watchers: [],
+    }),
+    setSessionShared: async (sessionId: string, shared: boolean) => {
+      sessions = sessions.map((s) => (s.id === sessionId ? { ...s, shared } : s));
+      return sessions.find((s) => s.id === sessionId)!;
+    },
+    teamSubscribe: async () => {},
+    teamUnsubscribe: async () => {},
+    sendTeamTask: async (peer: string | null, sessionId: string, text: string): Promise<TaskTicket> => ({
+      requestId: `mock-${Date.now()}`,
+      direction: "outgoing",
+      peer,
+      sessionId,
+      sessionTitle: sessions.find((s) => s.id === sessionId)?.title ?? null,
+      fromName: config.team.displayName,
+      fromSession: null,
+      text,
+      state: "delivered",
+      message: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }),
+    listTeamTasks: async (): Promise<TaskTicket[]> => [],
+    respondTeamTask: async (requestId: string, accept: boolean): Promise<TaskTicket> => ({
+      requestId,
+      direction: "incoming",
+      peer: null,
+      sessionId: "",
+      sessionTitle: null,
+      fromName: "",
+      fromSession: null,
+      text: "",
+      state: accept ? "delivered" : "rejected",
+      message: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }),
+    generateTeamToken: async () => "mock-team-token",
     subscribePtyOutput: async (sessionId: string, cb: PtyListener): Promise<UnlistenFn> => {
       let set = ptySubscribers.get(sessionId);
       if (!set) {
@@ -466,6 +533,12 @@ function createDevMockApi() {
         if (set?.size === 0) ptySubscribers.delete(sessionId);
       };
     },
+    onTeamUpdated: async (): Promise<UnlistenFn> => () => {},
+    onTeamTasksUpdated: async (): Promise<UnlistenFn> => () => {},
+    onTeamPtyOutput: async (): Promise<UnlistenFn> => () => {},
+    onTeamPtySnapshot: async (): Promise<UnlistenFn> => () => {},
+    onTeamPtyResize: async (): Promise<UnlistenFn> => () => {},
+    onTeamSessionGone: async (): Promise<UnlistenFn> => () => {},
     onPtyOutput: async (): Promise<UnlistenFn> => () => {},
     onSessionUpdated: async (): Promise<UnlistenFn> => () => {},
     onSessionSpawnFailed: async (): Promise<UnlistenFn> => () => {},
@@ -532,6 +605,23 @@ const tauriApi = {
   updateConfig: (config: VeloxConfig) =>
     invoke<VeloxConfig>("update_config", { config }),
 
+  // Velox Online (team)
+  getTeamStatus: () => invoke<TeamSnapshot>("get_team_status"),
+  setSessionShared: (sessionId: string, shared: boolean) =>
+    invoke<SessionRecord>("set_session_shared", { sessionId, shared }),
+  /** Start mirroring a teammate's session; a `team-pty-snapshot` event follows. */
+  teamSubscribe: (peer: string, sessionId: string) =>
+    invoke<void>("team_subscribe", { peer, sessionId }),
+  teamUnsubscribe: (peer: string, sessionId: string) =>
+    invoke<void>("team_unsubscribe", { peer, sessionId }),
+  /** `peer` null = a session on this machine. */
+  sendTeamTask: (peer: string | null, sessionId: string, text: string) =>
+    invoke<TaskTicket>("send_team_task", { peer, sessionId, text }),
+  listTeamTasks: () => invoke<TaskTicket[]>("list_team_tasks"),
+  respondTeamTask: (requestId: string, accept: boolean) =>
+    invoke<TaskTicket>("respond_team_task", { requestId, accept }),
+  generateTeamToken: () => invoke<string>("generate_team_token"),
+
   // Events
   subscribePtyOutput: async (sessionId: string, cb: PtyListener): Promise<UnlistenFn> => {
     let set = ptySubscribers.get(sessionId);
@@ -547,6 +637,18 @@ const tauriApi = {
       teardownSharedPtyListenerIfEmpty();
     };
   },
+  onTeamUpdated: (cb: (ev: TeamSnapshot) => void): Promise<UnlistenFn> =>
+    listen<TeamSnapshot>("team-updated", (e) => cb(e.payload)),
+  onTeamTasksUpdated: (cb: (ev: TaskTicket[]) => void): Promise<UnlistenFn> =>
+    listen<TaskTicket[]>("team-tasks-updated", (e) => cb(e.payload)),
+  onTeamPtyOutput: (cb: (ev: TeamPtyOutputEvent) => void): Promise<UnlistenFn> =>
+    listen<TeamPtyOutputEvent>("team-pty-output", (e) => cb(e.payload)),
+  onTeamPtySnapshot: (cb: (ev: TeamPtySnapshotEvent) => void): Promise<UnlistenFn> =>
+    listen<TeamPtySnapshotEvent>("team-pty-snapshot", (e) => cb(e.payload)),
+  onTeamPtyResize: (cb: (ev: TeamPtyResizeEvent) => void): Promise<UnlistenFn> =>
+    listen<TeamPtyResizeEvent>("team-pty-resize", (e) => cb(e.payload)),
+  onTeamSessionGone: (cb: (ev: TeamSessionGoneEvent) => void): Promise<UnlistenFn> =>
+    listen<TeamSessionGoneEvent>("team-session-gone", (e) => cb(e.payload)),
   onPtyOutput: (cb: (ev: PtyOutputEvent) => void): Promise<UnlistenFn> =>
     listen<PtyOutputEvent>("pty-output", (e) => cb(e.payload)),
   onSessionUpdated: (

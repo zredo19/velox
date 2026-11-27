@@ -49,6 +49,80 @@ pub struct VeloxConfig {
     /// Recently used project directories for quick selection in the "+" launcher.
     #[serde(default)]
     pub recent_dirs: Vec<String>,
+
+    /// Velox Online: share sessions with teammates over Tailscale (see docs/online/PLAN.md).
+    /// Must stay the LAST field: TOML emits tables after plain values.
+    #[serde(default)]
+    pub team: TeamConfig,
+}
+
+/// Velox Online settings (`[team]` table in config.toml).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamConfig {
+    /// Master switch. When false no server is started and no peer is dialed.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Name teammates see on this machine's sessions (e.g. "Rodolfo").
+    #[serde(default = "default_team_display_name")]
+    pub display_name: String,
+
+    /// TCP port of this machine's team WebSocket server.
+    #[serde(default = "default_team_port")]
+    pub listen_port: u16,
+
+    /// Address the team server binds to. Empty = auto-detect the Tailscale IPv4 (100.x.y.z).
+    /// "127.0.0.1" is allowed for local testing. Never bind 0.0.0.0.
+    #[serde(default)]
+    pub bind_host: String,
+
+    /// Shared secret every peer must present (Bearer token). Same value on every teammate.
+    #[serde(default)]
+    pub token: String,
+
+    /// Deliver task requests that come from this same machine without asking (agent -> local agent).
+    #[serde(default)]
+    pub auto_approve_local: bool,
+
+    /// Teammates this machine connects to. Keep LAST (array of tables).
+    #[serde(default)]
+    pub peers: Vec<PeerConfig>,
+}
+
+/// One teammate machine to connect to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerConfig {
+    /// Label used in the UI and in MCP tools (e.g. "Benjamin"). Unique per config.
+    pub name: String,
+    /// Tailscale MagicDNS name or IP, e.g. "benjamin" or "100.101.102.103".
+    pub host: String,
+    /// Peer's team server port.
+    #[serde(default = "default_team_port")]
+    pub port: u16,
+}
+
+fn default_team_port() -> u16 {
+    43120
+}
+
+fn default_team_display_name() -> String {
+    std::env::var("USERNAME").unwrap_or_else(|_| "Velox".to_string())
+}
+
+impl Default for TeamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            display_name: default_team_display_name(),
+            listen_port: default_team_port(),
+            bind_host: String::new(),
+            token: String::new(),
+            auto_approve_local: false,
+            peers: Vec::new(),
+        }
+    }
 }
 
 fn default_scrollback_bytes() -> usize {
@@ -112,12 +186,19 @@ impl Default for VeloxConfig {
             font_size: default_font_size(),
             animated_backgrounds: true,
             recent_dirs: vec![default_cwd()],
+            team: TeamConfig::default(),
         }
     }
 }
 
 /// Directory storing Velox configuration and persisted state (`%APPDATA%/velox`).
+/// `VELOX_CONFIG_DIR` overrides it so a second, isolated instance can run for testing.
 pub fn velox_config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("VELOX_CONFIG_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("velox")

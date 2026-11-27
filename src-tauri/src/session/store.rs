@@ -79,6 +79,7 @@ mod tests {
                 created_at: "2026-11-24T00:00:00Z".to_string(),
                 last_active_at: "2026-11-24T00:00:00Z".to_string(),
                 exit_code: Some(0),
+                shared: false,
             },
             SessionRecord {
                 id: "s2".to_string(),
@@ -96,6 +97,7 @@ mod tests {
                 created_at: "2026-11-24T00:00:00Z".to_string(),
                 last_active_at: "2026-11-24T00:00:00Z".to_string(),
                 exit_code: Some(1),
+                shared: false,
             },
         ];
 

@@ -278,6 +278,7 @@ impl SessionManager {
             created_at: now_str.clone(),
             last_active_at: now_str,
             exit_code: None,
+            shared: false,
         };
 
         // Insert record before spawn so early PTY output callbacks find the session
@@ -1100,6 +1101,7 @@ mod tests {
             created_at: "2026-11-24T00:00:00Z".to_string(),
             last_active_at: "2026-11-24T00:00:00Z".to_string(),
             exit_code: None,
+            shared: false,
         }
     }
 

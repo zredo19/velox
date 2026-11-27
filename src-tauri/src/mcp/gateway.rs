@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
+use crate::mcp::builtin::BuiltinMcp;
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -25,6 +26,8 @@ struct GatewayInner {
     mode: RwLock<McpGatewayMode>,
     last_error: RwLock<Option<String>>,
     backends: RwLock<BTreeMap<String, Arc<StdioMcpBackend>>>,
+    /// In-process MCP servers (e.g. `velox-team`), routed before stdio backends.
+    builtins: RwLock<BTreeMap<String, Arc<dyn BuiltinMcp>>>,
     sys: std::sync::Mutex<System>,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     server_task: Mutex<Option<JoinHandle<()>>>,
@@ -58,12 +61,18 @@ impl McpGatewayManager {
                 mode: RwLock::new(McpGatewayMode::Disabled),
                 last_error: RwLock::new(None),
                 backends: RwLock::new(initial_map),
+                builtins: RwLock::new(BTreeMap::new()),
                 sys: std::sync::Mutex::new(System::new()),
                 shutdown_tx: Mutex::new(None),
                 server_task: Mutex::new(None),
                 reaper_task: Mutex::new(None),
             }),
         }
+    }
+
+    /// Serve an in-process MCP server at `/mcp/{name}` (takes precedence over backends.json).
+    pub async fn register_builtin(&self, name: impl Into<String>, handler: Arc<dyn BuiltinMcp>) {
+        self.inner.builtins.write().await.insert(name.into(), handler);
     }
 
     pub async fn start(&self) -> VeloxResult<McpGatewaySnapshot> {
@@ -261,6 +270,14 @@ async fn mcp_rpc_route(
     State(mgr): State<McpGatewayManager>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    let builtin = mgr.inner.builtins.read().await.get(&name).cloned();
+    if let Some(handler) = builtin {
+        return match handler.handle_jsonrpc(body).await {
+            Some(response) => (StatusCode::OK, Json(response)),
+            None => (StatusCode::ACCEPTED, Json(json!({ "ok": true }))),
+        };
+    }
+
     let backend = mgr.inner.backends.read().await.get(&name).cloned();
     let Some(backend) = backend else {
         return (

@@ -35,6 +35,9 @@ pub struct SessionRecord {
     pub created_at: String,
     pub last_active_at: String,
     pub exit_code: Option<i32>,
+    /// Velox Online: teammates may see this session (read-only) and send it task requests.
+    #[serde(default)]
+    pub shared: bool,
 }
 
 /// Streamed PTY output chunk emitted via Tauri event `"pty-output"`.

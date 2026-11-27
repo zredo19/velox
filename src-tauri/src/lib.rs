@@ -3,6 +3,7 @@ pub mod domain;
 pub mod mcp;
 pub mod pty;
 pub mod session;
+pub mod team;
 pub mod telemetry;
 
 use crate::domain::config::VeloxConfig;
