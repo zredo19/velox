@@ -1748,8 +1748,54 @@ pub fn render_session_text(
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
+    // Full-screen TUIs (Claude Code runs on the alternate screen) leave long runs of blank rows
+    // between their content and the input box; collapse them so "last N lines" stays useful.
+    lines.dedup_by(|cur, prev| cur.is_empty() && prev.is_empty());
 
     let keep = (max_lines as usize).clamp(1, MAX_READ_LINES as usize);
     let start = lines.len().saturating_sub(keep);
     lines[start..].join("\n")
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    /// Replays a real ConPTY capture of Claude Code (alternate screen, 143x42).
+    struct FixtureSessions(Vec<u8>);
+
+    impl LocalSessions for FixtureSessions {
+        fn list_sessions(&self) -> Vec<SessionRecord> {
+            Vec::new()
+        }
+        fn pty_size(&self, _session_id: &str) -> Option<(u16, u16)> {
+            Some((143, 42))
+        }
+        fn get_scrollback_with_pos(&self, _session_id: &str) -> (Vec<u8>, StreamPos) {
+            (
+                self.0.clone(),
+                StreamPos {
+                    generation: 1,
+                    end_offset: self.0.len() as u64,
+                },
+            )
+        }
+        fn write_pty_bytes(&self, _session_id: &str, _data: &[u8]) -> VeloxResult<()> {
+            Ok(())
+        }
+        fn is_pty_alive(&self, _session_id: &str) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn full_screen_tui_keeps_content_when_reading_few_lines() {
+        let sessions = FixtureSessions(
+            include_bytes!("../../tests/fixtures/claude-alt-screen.bin").to_vec(),
+        );
+        let text = render_session_text(&sessions, "s", 25);
+        assert!(text.contains("RECIBIDO-VELOX"), "reply missing:\n{text}");
+        assert!(text.contains("Prueba de Velox Online."), "prompt missing:\n{text}");
+        assert!(!text.contains("\n\n\n"), "blank runs not collapsed:\n{text}");
+    }
 }
