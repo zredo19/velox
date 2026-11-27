@@ -1,14 +1,16 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
+import type { AgentKind } from "../../types/ipc";
 
 /**
  * The four agents as tiny, happy pixel critters, standing at the foot of the sidebar.
  * Every few seconds one of them hops or blinks (a short CSS animation added by a timer, so
- * nothing runs in between), and hovering one makes it hop. Nothing moves while the window
- * is hidden or unfocused.
+ * nothing runs in between), hovering makes it hop, and clicking launches that agent.
+ * Nothing moves while the window is hidden or unfocused.
  */
 
-/* '.' empty, B body, L highlight, D mouth / visor, E eye, A antenna light, F thruster. */
+/* '.' empty, B body, L highlight, D mouth / visor / shadow, E eye, A antenna light, F thruster. */
 interface Critter {
+  kind: AgentKind;
   name: string;
   map: readonly string[];
   /** Body colour per row (one entry is used for every row). */
@@ -22,6 +24,7 @@ interface Critter {
 
 const CREW: readonly Critter[] = [
   {
+    kind: "claude",
     name: "Claude",
     map: [
       "B.........B",
@@ -42,6 +45,7 @@ const CREW: readonly Critter[] = [
     glow: "rgba(240, 143, 105, 0.35)",
   },
   {
+    kind: "agy",
     name: "Antigravity",
     map: [
       ".....A.....",
@@ -63,46 +67,50 @@ const CREW: readonly Critter[] = [
     glow: "rgba(110, 160, 255, 0.35)",
   },
   {
+    /* Blocky OpenCode "O" critter: crisp off-white frame, dark inner counter & lower block */
+    kind: "opencode",
     name: "OpenCode",
     map: [
-      ".....B.....",
-      "....BLB....",
-      "...BLLLB...",
-      "..BBEBEBB..",
+      ".LLLLLLLLL.",
       ".BBBBBBBBB.",
-      "BBBDBBBDBBB",
-      ".BBBDDDBBB.",
-      "..BBBBBBB..",
-      "...BBBBB...",
-      "....B.B....",
+      ".BB.....BB.",
+      ".BB.E.E.BB.",
+      ".BB.....BB.",
+      ".BBDDDDDBB.",
+      ".BBDDDDDBB.",
+      ".BBBBBBBBB.",
+      ".BBBBBBBBB.",
+      "..BB...BB..",
     ],
-    body: ["#C9BBFF"],
-    light: "#ECE6FF",
-    dark: "#2A2340",
-    eye: "#221B36",
-    accent: "#C9BBFF",
-    glow: "rgba(196, 181, 253, 0.32)",
+    body: ["#EDEAE6"],
+    light: "#FFFFFF",
+    dark: "#5C5855",
+    eye: "#FDFCFC",
+    accent: "#9E9994",
+    glow: "rgba(244, 242, 240, 0.28)",
   },
   {
+    /* OpenAI Blossom-inspired Codex critter in iconic OpenAI emerald */
+    kind: "codex",
     name: "Codex",
     map: [
-      "...BBBBB...",
-      "..BLLLLLB..",
-      ".BBBBBBBBB.",
+      "...LL.LL...",
+      ".BBB...BBB.",
+      "BBLBBBBBLLB",
       ".BBEBBBEBB.",
-      ".BBBBBBBBB.",
+      "BBBBBBBBBBB",
       ".BBDBBBDBB.",
-      ".BBBDDDBBB.",
-      "..BBBBBBB..",
-      "...BBBBB...",
+      "BB.BDDDB.BB",
+      ".BBB...BBB.",
+      "...BB.BB...",
       "...B...B...",
     ],
-    body: ["#1FC398"],
-    light: "#8CEBCB",
-    dark: "#06281D",
-    eye: "#06281D",
-    accent: "#1FC398",
-    glow: "rgba(31, 195, 152, 0.32)",
+    body: ["#19C37D"],
+    light: "#86F0C5",
+    dark: "#06291C",
+    eye: "#06291C",
+    accent: "#38E0A0",
+    glow: "rgba(25, 195, 125, 0.38)",
   },
 ];
 
@@ -155,7 +163,11 @@ function CritterArt({ critter }: { critter: Critter }) {
   );
 }
 
-export function AgentCrew() {
+export const AgentCrew = memo(function AgentCrew({
+  onCritterClick,
+}: {
+  onCritterClick?: (kind: AgentKind) => void;
+}) {
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -196,19 +208,31 @@ export function AgentCrew() {
       aria-label="Agents"
     >
       {CREW.map((critter) => (
-        <div
+        <button
           key={critter.name}
-          title={critter.name}
-          className="velox-crew-critter"
+          type="button"
+          title={onCritterClick ? `Launch ${critter.name}` : critter.name}
+          aria-label={onCritterClick ? `Launch ${critter.name}` : critter.name}
+          className="velox-crew-critter bg-transparent border-0 p-0 focus:outline-none"
+          onClick={(e) => {
+            const el = e.currentTarget;
+            el.removeAttribute("data-act");
+            void el.offsetWidth;
+            el.setAttribute("data-act", "hop");
+            onCritterClick?.(critter.kind);
+          }}
           onAnimationEnd={(e) => {
-            if (e.target === e.currentTarget || (e.target as Element).classList.contains("velox-crew-eyes")) {
+            if (
+              e.target === e.currentTarget ||
+              (e.target as Element).classList.contains("velox-crew-eyes")
+            ) {
               e.currentTarget.removeAttribute("data-act");
             }
           }}
         >
           <CritterArt critter={critter} />
-        </div>
+        </button>
       ))}
     </div>
   );
-}
+});

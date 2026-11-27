@@ -1,16 +1,43 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { X } from "lucide-react";
 import { partitionSessions, useSessions } from "./hooks/useSessions";
 import { useSystemTelemetry } from "./hooks/useSystemTelemetry";
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
 import { TerminalPane } from "./components/TerminalPane";
-import { AgentLauncherModal } from "./components/AgentLauncherModal";
-import { McpDrawer } from "./components/McpDrawer";
 import { EmptyState } from "./components/EmptyState";
-import { SettingsModal } from "./components/SettingsModal";
 import { ThemeBackground } from "./themes/ThemeBackground";
-import { getAgentTheme } from "./themes/registry";
+import {
+  getAgentTheme,
+  loadThemePreference,
+  saveThemePreference,
+  THEME_OPTIONS,
+} from "./themes/registry";
+import type { ThemePreference } from "./themes/types";
 import type { AgentActivity } from "./lib/agentActivity";
+import type { AgentKind, SessionRecord } from "./types/ipc";
+
+// Lazily code-split overlay modals & drawers to keep initial startup bundle lean
+const AgentLauncherModal = lazy(() =>
+  import("./components/AgentLauncherModal").then((m) => ({ default: m.AgentLauncherModal })),
+);
+const McpDrawer = lazy(() =>
+  import("./components/McpDrawer").then((m) => ({ default: m.McpDrawer })),
+);
+const SettingsModal = lazy(() =>
+  import("./components/SettingsModal").then((m) => ({ default: m.SettingsModal })),
+);
+const CommandPalette = lazy(() =>
+  import("./components/CommandPalette").then((m) => ({ default: m.CommandPalette })),
+);
+const ShortcutsModal = lazy(() =>
+  import("./components/ShortcutsModal").then((m) => ({ default: m.ShortcutsModal })),
+);
+const ThemePickerModal = lazy(() =>
+  import("./components/ThemePickerModal").then((m) => ({ default: m.ThemePickerModal })),
+);
+
+const DEFAULT_FONT_SIZE = 13;
 
 export function App() {
   const {
@@ -22,6 +49,7 @@ export function App() {
     activeSession,
     loading,
     error,
+    clearError,
     createSession,
     selectSession,
     wakeSession,
@@ -38,9 +66,29 @@ export function App() {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [launcherOpen, setLauncherOpen] = useState(false);
+  const [launcherKind, setLauncherKind] = useState<AgentKind | null>(null);
   const [mcpDrawerOpen, setMcpDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [themesOpen, setThemesOpen] = useState(false);
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() =>
+    loadThemePreference(),
+  );
+  const [clearTrigger, setClearTrigger] = useState(0);
+  const [toast, setToast] = useState<string | null>(null);
   const [activity, setActivity] = useState<Record<string, AgentActivity | null>>({});
+  const toastTimerRef = useRef<number | undefined>(undefined);
+
+  const showToast = useCallback((message: string) => {
+    window.clearTimeout(toastTimerRef.current);
+    setToast(message);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+    }, 2000);
+  }, []);
+
+  useEffect(() => () => window.clearTimeout(toastTimerRef.current), []);
 
   const reportActivity = useCallback((id: string, next: AgentActivity | null) => {
     setActivity((prev) => (prev[id] === next ? prev : { ...prev, [id]: next }));
@@ -50,26 +98,78 @@ export function App() {
   const fontFamily =
     config?.fontFamily ??
     "'JetBrains Mono', 'Cascadia Code', Consolas, monospace";
-  const fontSize = config?.fontSize ?? 13;
+  const fontSize = config?.fontSize ?? DEFAULT_FONT_SIZE;
   const animated = config?.animatedBackgrounds ?? true;
   const activeTheme = getAgentTheme(
     activeSession ? (activeSession.activeAgent ?? activeSession.agentKind) : undefined,
     animated,
+    themePreference,
   );
-  const visibleSessions = partitionSessions(sessions).visible;
+
+  const { visible: visibleSessions } = useMemo(
+    () => partitionSessions(sessions),
+    [sessions],
+  );
+
+  const { blockedCount, workingCount } = useMemo(() => {
+    let blocked = 0;
+    let working = 0;
+    for (const s of sessions) {
+      if (s.status === "sleeping" || s.status === "exited") continue;
+      const a = activity[s.id];
+      if (a === "blocked") blocked += 1;
+      else if (a === "working") working += 1;
+    }
+    return { blockedCount: blocked, workingCount: working };
+  }, [sessions, activity]);
+
   // One shared canvas, only while an awake terminal is on screen.
   const showBackground =
     !loading && !!activeSession && activeSession.status !== "sleeping";
 
-  const handleLaunch = useCallback(
-    (presetId: string, cwd: string, title?: string) => {
-      setLauncherOpen(false);
-      void createSession(presetId, cwd, title);
+  const openLauncher = useCallback((kind: AgentKind | null = null) => {
+    setLauncherKind(kind);
+    setLauncherOpen(true);
+  }, []);
+
+  const handleOpenDefaultLauncher = useCallback(() => openLauncher(null), [openLauncher]);
+
+  const closeLauncher = useCallback(() => {
+    setLauncherOpen(false);
+    setLauncherKind(null);
+  }, []);
+
+  const handleToggleSidebar = useCallback(() => setSidebarOpen((v) => !v), []);
+  const handleToggleMcpDrawer = useCallback(() => setMcpDrawerOpen((v) => !v), []);
+  const handleOpenSettings = useCallback(() => setSettingsOpen(true), []);
+  const handleOpenPalette = useCallback(() => setPaletteOpen(true), []);
+  const handleOpenShortcuts = useCallback(() => setShortcutsOpen(true), []);
+  const handleOpenThemes = useCallback(() => setThemesOpen(true), []);
+  const handleCloseMcpDrawer = useCallback(() => setMcpDrawerOpen(false), []);
+  const handleCloseSettings = useCallback(() => setSettingsOpen(false), []);
+  const handleClosePalette = useCallback(() => setPaletteOpen(false), []);
+  const handleCloseShortcuts = useCallback(() => setShortcutsOpen(false), []);
+  const handleCloseThemes = useCallback(() => setThemesOpen(false), []);
+
+  const handleSelectTheme = useCallback(
+    (pref: ThemePreference) => {
+      setThemePreference(pref);
+      saveThemePreference(pref);
+      const label = THEME_OPTIONS.find((t) => t.id === pref)?.label ?? pref;
+      showToast(`Theme · ${label}`);
     },
-    [createSession],
+    [showToast],
   );
 
-  // Stable so the memoized TerminalPanes skip re-rendering on unrelated App updates.
+  const handleLaunch = useCallback(
+    (presetId: string, cwd: string, title?: string) => {
+      closeLauncher();
+      void createSession(presetId, cwd, title);
+    },
+    [closeLauncher, createSession],
+  );
+
+  // Stable so the memoized TerminalPanes & Sidebar skip re-rendering on unrelated App updates.
   const handlePaneWake = useCallback(
     (id: string, cols: number, rows: number) => {
       void wakeSession(id, cols, rows);
@@ -77,12 +177,128 @@ export function App() {
     [wakeSession],
   );
 
+  const handleSelectSession = useCallback(
+    (id: string) => {
+      void selectSession(id);
+    },
+    [selectSession],
+  );
+
+  const handleWakeSession = useCallback(
+    (id: string) => {
+      void wakeSession(id);
+    },
+    [wakeSession],
+  );
+
+  const handleSleepSession = useCallback(
+    (id: string) => {
+      void sleepSession(id);
+    },
+    [sleepSession],
+  );
+
+  const handleCloseSession = useCallback(
+    (id: string) => {
+      void closeSession(id);
+    },
+    [closeSession],
+  );
+
+  const handleRenameSession = useCallback(
+    (id: string, title: string) => {
+      void renameSession(id, title);
+    },
+    [renameSession],
+  );
+
+  const handleReorderSessions = useCallback(
+    (ids: string[]) => {
+      void reorderSessions(ids);
+    },
+    [reorderSessions],
+  );
+
+  const handleDuplicateSession = useCallback(
+    (session: SessionRecord) => {
+      void createSession(session.presetId, session.cwd, `${session.title} (2)`);
+      showToast(`Duplicated ${session.title}`);
+    },
+    [createSession, showToast],
+  );
+
+  const handleCopyPath = useCallback(
+    (path: string) => {
+      void navigator.clipboard
+        .writeText(path)
+        .then(() => showToast("Folder path copied"))
+        .catch(() => {});
+    },
+    [showToast],
+  );
+
+  const handleSleepIdleSessions = useCallback(() => {
+    void sleepIdleSessions().then(() => showToast("Idle sessions hibernated"));
+  }, [sleepIdleSessions, showToast]);
+
   const handleQuickLaunch = useCallback(
     (presetId: string) => {
       void createSession(presetId, defaultCwd || undefined);
     },
     [createSession, defaultCwd],
   );
+
+  const handleLaunchAgentKind = useCallback(
+    (kind: AgentKind) => {
+      openLauncher(kind);
+    },
+    [openLauncher],
+  );
+
+  const adjustFontSize = useCallback(
+    (nextSize: number) => {
+      if (!config) return;
+      const clamped = Math.max(10, Math.min(20, nextSize));
+      if (clamped === config.fontSize) {
+        showToast(`Font size · ${clamped}px`);
+        return;
+      }
+      void updateConfig({ ...config, fontSize: clamped });
+      showToast(`Font size · ${clamped}px`);
+    },
+    [config, updateConfig, showToast],
+  );
+
+  const handleZoomIn = useCallback(
+    () => adjustFontSize(fontSize + 1),
+    [adjustFontSize, fontSize],
+  );
+  const handleZoomOut = useCallback(
+    () => adjustFontSize(fontSize - 1),
+    [adjustFontSize, fontSize],
+  );
+  const handleZoomReset = useCallback(
+    () => adjustFontSize(DEFAULT_FONT_SIZE),
+    [adjustFontSize],
+  );
+
+  const handleToggleAnimated = useCallback(() => {
+    if (!config) return;
+    const next = !config.animatedBackgrounds;
+    void updateConfig({ ...config, animatedBackgrounds: next });
+    showToast(next ? "Animated backgrounds enabled" : "Animated backgrounds disabled");
+  }, [config, updateConfig, showToast]);
+
+  const handleClearTerminal = useCallback(() => {
+    setClearTrigger((n) => n + 1);
+  }, []);
+
+  const handleSleepActive = useCallback(() => {
+    if (activeSessionId) {
+      void sleepSession(activeSessionId);
+      showToast("Session hibernated · 0 MB RAM");
+    }
+  }, [activeSessionId, sleepSession, showToast]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -105,13 +321,20 @@ export function App() {
         if (key === "n") run(() => setLauncherOpen((v) => !v));
         else if (key === "b") run(() => setSidebarOpen((v) => !v));
         else if (key === "m") run(() => setMcpDrawerOpen((v) => !v));
-        else if (key === "h" && activeSessionId) run(() => void sleepSession(activeSessionId));
+        else if (key === "p") run(() => setPaletteOpen((v) => !v));
+        else if (key === "t") run(() => setThemesOpen((v) => !v));
+        else if (key === "h" && activeSessionId) run(handleSleepActive);
         return;
       }
 
-      // Plain Ctrl+N also opens the launcher, like any app's "new" (Ctrl+Shift+N still works).
+      // Plain Ctrl+N opens launcher, Ctrl+K opens Command Palette, Ctrl+/ opens Shortcuts
       if (key === "n") run(() => setLauncherOpen((v) => !v));
+      else if (key === "k") run(() => setPaletteOpen((v) => !v));
+      else if (key === "/") run(() => setShortcutsOpen((v) => !v));
       else if (key === ",") run(() => setSettingsOpen((v) => !v));
+      else if (key === "=" || key === "+") run(handleZoomIn);
+      else if (key === "-") run(handleZoomOut);
+      else if (key === "0") run(handleZoomReset);
       // Ctrl+W deletes a word inside the terminal, so it only closes from outside it.
       else if (key === "w" && activeSessionId && !inTerminal) {
         run(() => void closeSession(activeSessionId));
@@ -124,59 +347,96 @@ export function App() {
     // Capture phase: runs before any element below can swallow the shortcut.
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [activeSessionId, visibleSessions, selectSession, sleepSession, closeSession]);
+  }, [
+    activeSessionId,
+    visibleSessions,
+    selectSession,
+    closeSession,
+    handleSleepActive,
+    handleZoomIn,
+    handleZoomOut,
+    handleZoomReset,
+  ]);
 
   return (
     <div
       data-agent-theme={activeTheme.id}
-      className="h-screen w-screen bg-[var(--velox-canvas)] text-[var(--velox-ink)] flex flex-col overflow-hidden">
+      className="h-screen w-screen bg-[var(--velox-canvas)] text-[var(--velox-ink)] flex flex-col overflow-hidden velox-chrome-transition"
+    >
       <TitleBar
         sidebarOpen={sidebarOpen}
-        onToggleSidebar={() => setSidebarOpen((v) => !v)}
-        onOpenLauncher={() => setLauncherOpen(true)}
+        onToggleSidebar={handleToggleSidebar}
+        onOpenLauncher={handleOpenDefaultLauncher}
+        onOpenPalette={handleOpenPalette}
+        onOpenThemes={handleOpenThemes}
+        onOpenShortcuts={handleOpenShortcuts}
+        onCopyPath={handleCopyPath}
         activeSession={activeSession}
+        blockedCount={blockedCount}
+        workingCount={workingCount}
         telemetry={telemetry}
         mcp={mcp}
         mcpDrawerOpen={mcpDrawerOpen}
-        onToggleMcpDrawer={() => setMcpDrawerOpen((v) => !v)}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onToggleMcpDrawer={handleToggleMcpDrawer}
+        onOpenSettings={handleOpenSettings}
       />
 
       {error && (
-        <div className="px-4 py-1.5 bg-rose-500/12 border-b border-rose-500/25 text-[12px] text-rose-300 flex items-center justify-between">
+        <div className="px-4 py-1.5 bg-rose-500/12 border-b border-rose-500/25 text-[12px] text-rose-300 flex items-center justify-between gap-3 animate-velox-toast-in">
           <span className="truncate">{error}</span>
+          <button
+            type="button"
+            onClick={clearError}
+            aria-label="Dismiss error"
+            className="shrink-0 p-0.5 rounded hover:bg-rose-500/20 text-rose-300 transition-colors cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 
       <div className="flex-1 flex min-h-0 overflow-hidden">
-        {sidebarOpen && (
+        <div
+          className="velox-sidebar-shell"
+          style={{
+            width: sidebarOpen ? 256 : 0,
+            opacity: sidebarOpen ? 1 : 0,
+            pointerEvents: sidebarOpen ? "auto" : "none",
+          }}
+          aria-hidden={!sidebarOpen}
+        >
           <Sidebar
             sessions={sessions}
             activity={activity}
             activeSessionId={activeSessionId}
-            onSelectSession={(id) => void selectSession(id)}
-            onWakeSession={(id) => void wakeSession(id)}
-            onSleepSession={(id) => void sleepSession(id)}
-            onCloseSession={(id) => void closeSession(id)}
-            onRenameSession={(id, title) => void renameSession(id, title)}
-            onReorderSessions={(ids) => void reorderSessions(ids)}
-            onSleepIdleSessions={() => void sleepIdleSessions()}
-            onOpenLauncher={() => setLauncherOpen(true)}
+            onSelectSession={handleSelectSession}
+            onWakeSession={handleWakeSession}
+            onSleepSession={handleSleepSession}
+            onCloseSession={handleCloseSession}
+            onRenameSession={handleRenameSession}
+            onDuplicateSession={handleDuplicateSession}
+            onCopyPath={handleCopyPath}
+            onReorderSessions={handleReorderSessions}
+            onSleepIdleSessions={handleSleepIdleSessions}
+            onOpenLauncher={handleOpenDefaultLauncher}
+            onLaunchAgentKind={handleLaunchAgentKind}
           />
-        )}
+        </div>
 
-        <main className="flex-1 min-w-0 h-full bg-[var(--velox-canvas)] relative overflow-hidden">
+        <main className="flex-1 min-w-0 h-full bg-[var(--velox-canvas)] relative overflow-hidden velox-chrome-transition">
           {showBackground && <ThemeBackground theme={activeTheme} />}
           {loading ? (
-            <div className="h-full w-full flex items-center justify-center text-[13px] text-[var(--velox-ink-muted)]">
-              Loading workspace...
+            <div className="h-full w-full flex flex-col items-center justify-center gap-2.5 text-[13px] text-[var(--velox-ink-muted)]">
+              <div className="w-5 h-5 rounded-full border-2 border-[var(--velox-accent)]/30 border-t-[var(--velox-accent)] animate-spin" />
+              <span>Loading workspace…</span>
             </div>
           ) : sessions.length === 0 ? (
             <EmptyState
               presets={presets}
               defaultCwd={defaultCwd}
               onQuickLaunch={handleQuickLaunch}
-              onOpenLauncher={() => setLauncherOpen(true)}
+              onOpenLauncher={handleOpenDefaultLauncher}
+              onOpenPalette={handleOpenPalette}
             />
           ) : (
             sessions.map((session) => (
@@ -186,7 +446,12 @@ export function App() {
                 isActive={activeSessionId === session.id}
                 fontFamily={fontFamily}
                 fontSize={fontSize}
-                theme={getAgentTheme(session.activeAgent ?? session.agentKind, animated)}
+                theme={getAgentTheme(
+                  session.activeAgent ?? session.agentKind,
+                  animated,
+                  themePreference,
+                )}
+                clearTrigger={clearTrigger}
                 onActivity={reportActivity}
                 onWake={handlePaneWake}
               />
@@ -195,31 +460,96 @@ export function App() {
         </main>
       </div>
 
-      <AgentLauncherModal
-        open={launcherOpen}
-        onClose={() => setLauncherOpen(false)}
-        presets={presets}
-        recentDirs={recentDirs}
-        defaultCwd={defaultCwd}
-        onLaunch={handleLaunch}
-      />
+      {/* Subtle floating action toast */}
+      {toast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed bottom-4 right-4 z-50 px-3.5 py-2 rounded-xl bg-[var(--velox-elevated)]/95 border border-white/[0.12] text-[12px] font-medium text-[var(--velox-ink)] shadow-[0_14px_34px_-10px_rgba(0,0,0,0.85)] animate-velox-toast-in"
+        >
+          {toast}
+        </div>
+      )}
 
-      <McpDrawer
-        open={mcpDrawerOpen}
-        onClose={() => setMcpDrawerOpen(false)}
-        mcp={mcp}
-        telemetry={telemetry}
-        onSleepBackend={sleepMcpBackend}
-        onSleepAllMcps={sleepAllMcps}
-        onSleepIdleSessions={sleepIdleSessions}
-      />
+      <Suspense fallback={null}>
+        {launcherOpen && (
+          <AgentLauncherModal
+            open={launcherOpen}
+            onClose={closeLauncher}
+            presets={presets}
+            recentDirs={recentDirs}
+            defaultCwd={defaultCwd}
+            initialKind={launcherKind}
+            onLaunch={handleLaunch}
+          />
+        )}
 
-      <SettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        config={config}
-        onSave={updateConfig}
-      />
+        {mcpDrawerOpen && (
+          <McpDrawer
+            open={mcpDrawerOpen}
+            onClose={handleCloseMcpDrawer}
+            mcp={mcp}
+            telemetry={telemetry}
+            onSleepBackend={sleepMcpBackend}
+            onSleepAllMcps={sleepAllMcps}
+            onSleepIdleSessions={sleepIdleSessions}
+          />
+        )}
+
+        {settingsOpen && (
+          <SettingsModal
+            open={settingsOpen}
+            onClose={handleCloseSettings}
+            config={config}
+            themePreference={themePreference}
+            onSelectTheme={handleSelectTheme}
+            onSave={updateConfig}
+          />
+        )}
+
+        {paletteOpen && (
+          <CommandPalette
+            open={paletteOpen}
+            onClose={handleClosePalette}
+            sessions={sessions}
+            presets={presets}
+            activeSession={activeSession}
+            animatedBackgrounds={animated}
+            themePreference={themePreference}
+            onSelectSession={handleSelectSession}
+            onQuickLaunch={handleQuickLaunch}
+            onOpenLauncher={handleOpenDefaultLauncher}
+            onOpenThemes={handleOpenThemes}
+            onSelectTheme={handleSelectTheme}
+            onToggleSidebar={handleToggleSidebar}
+            onToggleMcpDrawer={handleToggleMcpDrawer}
+            onOpenSettings={handleOpenSettings}
+            onOpenShortcuts={handleOpenShortcuts}
+            onSleepActive={handleSleepActive}
+            onSleepIdle={handleSleepIdleSessions}
+            onToggleAnimated={handleToggleAnimated}
+            onClearTerminal={handleClearTerminal}
+            onZoomIn={handleZoomIn}
+            onZoomOut={handleZoomOut}
+            onZoomReset={handleZoomReset}
+          />
+        )}
+
+        {themesOpen && (
+          <ThemePickerModal
+            open={themesOpen}
+            onClose={handleCloseThemes}
+            selected={themePreference}
+            animatedBackgrounds={animated}
+            onSelectTheme={handleSelectTheme}
+            onToggleAnimated={handleToggleAnimated}
+          />
+        )}
+
+        {shortcutsOpen && (
+          <ShortcutsModal open={shortcutsOpen} onClose={handleCloseShortcuts} />
+        )}
+      </Suspense>
     </div>
   );
 }

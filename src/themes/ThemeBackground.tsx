@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { AgentTheme, Rect, SceneMode } from "./types";
 import { runScene, type SceneLoop } from "./shared/sceneLoop";
 import type { SceneWorkerReply, SceneWorkerRequest } from "./sceneWorkerProtocol";
@@ -30,8 +30,10 @@ interface Driver {
 
 function SceneLayers({ theme }: { theme: AgentTheme }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
+    setReady(false);
     const host = hostRef.current;
     const createScene = theme.createScene;
     if (!host || !createScene) return;
@@ -49,6 +51,7 @@ function SceneLayers({ theme }: { theme: AgentTheme }) {
     let canvases: HTMLCanvasElement[] = [];
     let lastResize: [number, number, number, number] | null = null;
     let mode = currentMode();
+    let revealed = false;
 
     const makeCanvases = () => {
       for (const canvas of canvases) canvas.remove();
@@ -70,6 +73,10 @@ function SceneLayers({ theme }: { theme: AgentTheme }) {
         style.width = `${box.width}px`;
         style.height = `${box.height}px`;
       });
+      if (!revealed) {
+        revealed = true;
+        setReady(true);
+      }
     };
 
     const startOnMainThread = (): Driver => {
@@ -109,7 +116,8 @@ function SceneLayers({ theme }: { theme: AgentTheme }) {
     let driver: Driver = CAN_USE_WORKER ? startWorker() : startOnMainThread();
 
     let lastSize = "";
-    const resize = () => {
+    let resizeTimer: number | undefined;
+    const applyResize = () => {
       const { clientWidth: width, clientHeight: height } = host;
       if (width < 1 || height < 1) return;
       const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
@@ -124,11 +132,22 @@ function SceneLayers({ theme }: { theme: AgentTheme }) {
       driver.resize(width, height, dpr, contentLeft);
     };
 
-    const observer = new ResizeObserver(resize);
+    const scheduleResize = () => {
+      // First layout runs synchronously; subsequent resizes (e.g. sidebar transition or
+      // window drag) are debounced so clouds/halo sprites are not rebuilt mid-animation.
+      if (!lastSize) {
+        applyResize();
+        return;
+      }
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(applyResize, 80);
+    };
+
+    const observer = new ResizeObserver(scheduleResize);
     observer.observe(host);
     // Toggling the sidebar resizes <main> but not the row.
     if (main) observer.observe(main);
-    resize();
+    applyResize();
     driver.setMode(mode);
 
     const updateMode = () => {
@@ -140,6 +159,7 @@ function SceneLayers({ theme }: { theme: AgentTheme }) {
     document.addEventListener("visibilitychange", updateMode);
 
     return () => {
+      window.clearTimeout(resizeTimer);
       window.removeEventListener("focus", updateMode);
       window.removeEventListener("blur", updateMode);
       document.removeEventListener("visibilitychange", updateMode);
@@ -151,10 +171,17 @@ function SceneLayers({ theme }: { theme: AgentTheme }) {
     };
   }, [theme]);
 
-  return <div ref={hostRef} className="absolute inset-0 overflow-hidden" />;
+  return (
+    <div
+      ref={hostRef}
+      className={`absolute inset-0 overflow-hidden transition-opacity duration-300 ease-out ${
+        ready ? "opacity-100" : "opacity-0"
+      }`}
+    />
+  );
 }
 
-export function ThemeBackground({ theme }: { theme: AgentTheme }) {
+export const ThemeBackground = memo(function ThemeBackground({ theme }: { theme: AgentTheme }) {
   if (!theme.createScene) return null;
 
   return (
@@ -162,4 +189,4 @@ export function ThemeBackground({ theme }: { theme: AgentTheme }) {
       <SceneLayers theme={theme} />
     </div>
   );
-}
+});

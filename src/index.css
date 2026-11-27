@@ -17,7 +17,7 @@
   --velox-accent-soft: #9CC2FF;
 }
 
-/* Claude sessions: warm chrome. Redefined on the app root, so it only affects its subtree. */
+/* Claude sessions: warm espresso chrome. Redefined on the app root, so it only affects its subtree. */
 [data-agent-theme="claude"] {
   --velox-canvas: #17120F;
   --velox-surface: #1B1512;
@@ -33,7 +33,7 @@
   --velox-accent-soft: #F0A080;
 }
 
-/* Antigravity sessions: deep navy chrome. */
+/* Antigravity sessions: deep cosmic navy chrome. */
 [data-agent-theme="agy"] {
   --velox-canvas: #0B0E17;
   --velox-surface: #10152A;
@@ -49,6 +49,150 @@
   --velox-accent-soft: #9ED0FF;
 }
 
+/* Codex sessions: OpenAI emerald obsidian chrome. */
+[data-agent-theme="codex"] {
+  --velox-canvas: #091310;
+  --velox-surface: #0D1A15;
+  --velox-elevated: #13251F;
+  --velox-hover: #183028;
+  --velox-active: #1D3A30;
+  --velox-ink: #E6F4EF;
+  --velox-ink-secondary: #98BCB0;
+  --velox-ink-muted: #5F8478;
+  --velox-ink-soft: #789F92;
+  --velox-ink-faint: #46665C;
+  --velox-accent: #19C37D;
+  --velox-accent-soft: #7CEAD0;
+}
+
+/* OpenCode sessions: authentic minimalist warm charcoal & off-white chrome. */
+[data-agent-theme="opencode"] {
+  --velox-canvas: #141212;
+  --velox-surface: #1A1717;
+  --velox-elevated: #23201F;
+  --velox-hover: #2C2827;
+  --velox-active: #35302E;
+  --velox-ink: #F4F2F0;
+  --velox-ink-secondary: #B8B2AD;
+  --velox-ink-muted: #7C7672;
+  --velox-ink-soft: #96908B;
+  --velox-ink-faint: #5C5754;
+  --velox-accent: #E8E4DF;
+  --velox-accent-soft: #FFFFFF;
+}
+
+/* Custom Theme: Tokyo Night */
+[data-agent-theme="tokyo-night"] {
+  --velox-canvas: #131522;
+  --velox-surface: #181B2C;
+  --velox-elevated: #20243A;
+  --velox-hover: #272C47;
+  --velox-active: #2F3656;
+  --velox-ink: #C8D3F5;
+  --velox-ink-secondary: #9AA5CE;
+  --velox-ink-muted: #636DA6;
+  --velox-ink-soft: #7E89BA;
+  --velox-ink-faint: #4C5582;
+  --velox-accent: #7AA2F7;
+  --velox-accent-soft: #B4CEFF;
+}
+
+/* Custom Theme: Catppuccin Mocha */
+[data-agent-theme="catppuccin"] {
+  --velox-canvas: #181825;
+  --velox-surface: #1E1E2E;
+  --velox-elevated: #27273C;
+  --velox-hover: #313244;
+  --velox-active: #3B3B54;
+  --velox-ink: #CDD6F4;
+  --velox-ink-secondary: #A6ADC8;
+  --velox-ink-muted: #6C7086;
+  --velox-ink-soft: #8990AC;
+  --velox-ink-faint: #585B70;
+  --velox-accent: #CBA6F7;
+  --velox-accent-soft: #E5D0FF;
+}
+
+/* Custom Theme: Synthwave '84 */
+[data-agent-theme="synthwave"] {
+  --velox-canvas: #120B1F;
+  --velox-surface: #190F2B;
+  --velox-elevated: #23163D;
+  --velox-hover: #2E1D4F;
+  --velox-active: #3A2363;
+  --velox-ink: #F4EAFF;
+  --velox-ink-secondary: #C4AEE6;
+  --velox-ink-muted: #846BA8;
+  --velox-ink-soft: #A086C4;
+  --velox-ink-faint: #644C87;
+  --velox-accent: #FF2E97;
+  --velox-accent-soft: #FF8BC4;
+}
+
+/* Custom Theme: Nord Frost */
+[data-agent-theme="nord"] {
+  --velox-canvas: #181E28;
+  --velox-surface: #1E2532;
+  --velox-elevated: #273041;
+  --velox-hover: #303B50;
+  --velox-active: #39465E;
+  --velox-ink: #ECEFF4;
+  --velox-ink-secondary: #B8C4D6;
+  --velox-ink-muted: #72829E;
+  --velox-ink-soft: #8FA0BC;
+  --velox-ink-faint: #586782;
+  --velox-accent: #88C0D0;
+  --velox-accent-soft: #BFE6F0;
+}
+
+/* Custom Theme: Dracula */
+[data-agent-theme="dracula"] {
+  --velox-canvas: #171824;
+  --velox-surface: #1E2030;
+  --velox-elevated: #26293E;
+  --velox-hover: #2F334C;
+  --velox-active: #393E5C;
+  --velox-ink: #F8F8F2;
+  --velox-ink-secondary: #BABED8;
+  --velox-ink-muted: #767CA3;
+  --velox-ink-soft: #949AC0;
+  --velox-ink-faint: #5B6185;
+  --velox-accent: #BD93F9;
+  --velox-accent-soft: #DFC7FF;
+}
+
+/* Custom Theme: Gruvbox Dark */
+[data-agent-theme="gruvbox"] {
+  --velox-canvas: #1B1917;
+  --velox-surface: #22201D;
+  --velox-elevated: #2C2925;
+  --velox-hover: #36322D;
+  --velox-active: #423C35;
+  --velox-ink: #FBF1C7;
+  --velox-ink-secondary: #D5C4A1;
+  --velox-ink-muted: #928374;
+  --velox-ink-soft: #B0A08A;
+  --velox-ink-faint: #73665A;
+  --velox-accent: #FABD2F;
+  --velox-accent-soft: #FFE08A;
+}
+
+/* Custom Theme: Matrix Rain */
+[data-agent-theme="matrix"] {
+  --velox-canvas: #060E09;
+  --velox-surface: #0A160E;
+  --velox-elevated: #102418;
+  --velox-hover: #163222;
+  --velox-active: #1C402B;
+  --velox-ink: #D4FFE8;
+  --velox-ink-secondary: #8BC9A8;
+  --velox-ink-muted: #4C8567;
+  --velox-ink-soft: #66A383;
+  --velox-ink-faint: #35634B;
+  --velox-accent: #00E676;
+  --velox-accent-soft: #80FFBF;
+}
+
 html,
 body,
 #root {
@@ -61,6 +205,13 @@ body,
   color: var(--velox-ink);
   font-family: "Inter", "Segoe UI Variable", system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+.velox-chrome-transition {
+  transition:
+    background-color 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 180ms ease;
 }
 
 .font-mono,
@@ -81,10 +232,11 @@ body,
 ::-webkit-scrollbar-thumb {
   background: rgba(152, 162, 184, 0.18);
   border-radius: 9999px;
+  transition: background-color 150ms ease;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(152, 162, 184, 0.34);
+  background: rgba(152, 162, 184, 0.36);
 }
 
 /* Seamless xterm.js canvas integration */
@@ -117,6 +269,19 @@ main[data-velox-scene-main] {
   background-color: transparent;
 }
 
+/* Smooth collapsible sidebar wrapper */
+.velox-sidebar-shell {
+  position: relative;
+  z-index: 20;
+  flex-shrink: 0;
+  height: 100%;
+  overflow: hidden;
+  transition:
+    width 200ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 160ms ease;
+  will-change: width;
+}
+
 /* Above the scene and the terminal pane (its shadow falls on the terminal's left padding,
  * and the row context menu, which lives inside it, must not slip under the terminal). */
 .velox-sidebar {
@@ -124,26 +289,27 @@ main[data-velox-scene-main] {
   z-index: 20;
   background-color: var(--velox-surface);
   border-right: 1px solid rgba(255, 255, 255, 0.07);
+  transition:
+    background-color 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 220ms ease;
 }
 
 /* Over the scene: tinted glass (no blur: it would smear the tiny stars and re-filter the
  * wallpaper on every frame), a crisp divider with a soft accent glint, and a shadow that
  * lifts the panel off the terminal area. */
-[data-velox-scene] > .velox-sidebar {
+[data-velox-scene] .velox-sidebar {
   background-color: transparent;
-  background-image: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--velox-surface) 44%, transparent) 0%,
-    color-mix(in srgb, var(--velox-surface) 54%, transparent) 70%,
-    color-mix(in srgb, var(--velox-surface) 72%, transparent) 100%
-  );
+  background-image: linear-gradient(180deg,
+      color-mix(in srgb, var(--velox-surface) 44%, transparent) 0%,
+      color-mix(in srgb, var(--velox-surface) 54%, transparent) 70%,
+      color-mix(in srgb, var(--velox-surface) 74%, transparent) 100%);
   border-right-color: rgba(255, 255, 255, 0.11);
   box-shadow:
     1px 0 0 rgba(0, 0, 0, 0.4),
     12px 0 28px -14px rgba(0, 0, 0, 0.75);
 }
 
-[data-velox-scene] > .velox-sidebar::after {
+[data-velox-scene] .velox-sidebar::after {
   content: "";
   position: absolute;
   top: 0;
@@ -151,18 +317,16 @@ main[data-velox-scene-main] {
   right: 0;
   width: 1px;
   pointer-events: none;
-  background: linear-gradient(
-    180deg,
-    transparent 0%,
-    color-mix(in srgb, var(--velox-accent) 55%, transparent) 22%,
-    color-mix(in srgb, var(--velox-accent-soft) 30%, transparent) 60%,
-    transparent 100%
-  );
+  background: linear-gradient(180deg,
+      transparent 0%,
+      color-mix(in srgb, var(--velox-accent) 55%, transparent) 22%,
+      color-mix(in srgb, var(--velox-accent-soft) 30%, transparent) 60%,
+      transparent 100%);
 }
 
 /* Rows become glass too, so the sky still shows through a selected session. */
 [data-velox-scene] .velox-row-active {
-  background-color: color-mix(in srgb, var(--velox-active) 70%, transparent);
+  background-color: color-mix(in srgb, var(--velox-active) 72%, transparent);
 }
 
 [data-velox-scene] .velox-row:hover {
@@ -185,8 +349,13 @@ main[data-velox-scene-main] {
 .velox-crew-critter {
   position: relative;
   display: flex;
-  cursor: default;
+  cursor: pointer;
   transform-origin: 50% 100%;
+  transition: filter 160ms ease;
+}
+
+.velox-crew-critter:hover {
+  filter: brightness(1.12);
 }
 
 .velox-crew-critter[data-act="hop"],
@@ -207,35 +376,58 @@ main[data-velox-scene-main] {
   0% {
     transform: translateY(0) scale(1, 1);
   }
+
   18% {
     transform: translateY(0) scale(1.1, 0.88);
   }
+
   45% {
     transform: translateY(-6px) scale(0.94, 1.07);
   }
+
   72% {
     transform: translateY(0) scale(1.07, 0.93);
   }
+
   100% {
     transform: translateY(0) scale(1, 1);
   }
 }
 
 @keyframes velox-crew-blink {
+
   0%,
   100% {
     transform: scaleY(1);
   }
+
   50% {
     transform: scaleY(0.15);
   }
 }
 
+/* ---- UI Motion Primitives ------------------------------------------------------------ */
+
+@keyframes velox-fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-velox-fade-in {
+  animation: velox-fade-in 150ms ease-out;
+}
+
 @keyframes velox-slide-in {
   from {
     opacity: 0;
-    transform: translateX(14px);
+    transform: translateX(18px);
   }
+
   to {
     opacity: 1;
     transform: translateX(0);
@@ -243,14 +435,15 @@ main[data-velox-scene-main] {
 }
 
 .animate-velox-slide-in {
-  animation: velox-slide-in 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  animation: velox-slide-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @keyframes velox-pop-in {
   from {
     opacity: 0;
-    transform: translateY(6px) scale(0.985);
+    transform: translateY(8px) scale(0.975);
   }
+
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
@@ -258,12 +451,69 @@ main[data-velox-scene-main] {
 }
 
 .animate-velox-pop-in {
-  animation: velox-pop-in 130ms cubic-bezier(0.16, 1, 0.3, 1);
+  animation: velox-pop-in 165ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes velox-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-velox-toast-in {
+  animation: velox-toast-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes velox-card-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-velox-card-rise {
+  animation: velox-card-rise 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Keyboard keycap styling */
+.velox-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.35rem;
+  height: 1.25rem;
+  padding: 0 0.35rem;
+  border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--velox-ink-secondary);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.35);
 }
 
 @media (prefers-reduced-motion: reduce) {
+
+  .animate-velox-fade-in,
   .animate-velox-slide-in,
-  .animate-velox-pop-in {
-    animation: none;
+  .animate-velox-pop-in,
+  .animate-velox-toast-in,
+  .animate-velox-card-rise,
+  .velox-sidebar-shell,
+  .velox-chrome-transition {
+    animation: none !important;
+    transition: none !important;
   }
 }

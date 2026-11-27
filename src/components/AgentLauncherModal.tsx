@@ -10,6 +10,7 @@ export interface AgentLauncherModalProps {
   presets: AgentPreset[];
   recentDirs: string[];
   defaultCwd: string;
+  initialKind?: AgentKind | null;
   onLaunch: (presetId: string, cwd: string, title?: string) => void;
 }
 
@@ -33,6 +34,7 @@ export function AgentLauncherModal({
   presets,
   recentDirs,
   defaultCwd,
+  initialKind = null,
   onLaunch,
 }: AgentLauncherModalProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -52,12 +54,15 @@ export function AgentLauncherModal({
 
   useEffect(() => {
     if (open) {
-      setSelectedIndex(0);
+      const initialIdx = initialKind
+        ? sortedPresets.findIndex((p) => p.kind === initialKind)
+        : 0;
+      setSelectedIndex(initialIdx >= 0 ? initialIdx : 0);
       setCwd(defaultCwd);
       setTitle("");
       setBrowseError(null);
     }
-  }, [open, defaultCwd]);
+  }, [open, defaultCwd, initialKind, sortedPresets]);
 
   useEffect(() => {
     if (!open) return;
@@ -126,7 +131,7 @@ export function AgentLauncherModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-[2px] p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-[2px] p-4 animate-velox-fade-in"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -134,17 +139,17 @@ export function AgentLauncherModal({
       aria-modal="true"
       aria-labelledby="velox-launcher-title"
     >
-      <div className="w-full max-w-[548px] bg-[#151923] border border-white/[0.09] rounded-xl shadow-2xl overflow-hidden animate-velox-pop-in">
+      <div className="w-full max-w-[556px] bg-[var(--velox-surface)] border border-white/[0.1] rounded-xl shadow-[0_28px_70px_-20px_rgba(0,0,0,0.85)] overflow-hidden animate-velox-pop-in">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-white/[0.07]">
           <div>
             <h2
               id="velox-launcher-title"
-              className="text-[14.5px] font-medium text-[#E6EAF2]"
+              className="text-[14.5px] font-medium text-[var(--velox-ink)]"
             >
               Launch agent
             </h2>
-            <p className="text-[12px] text-[#7E889E] mt-0.5">
+            <p className="text-[12px] text-[var(--velox-ink-soft)] mt-0.5">
               Pick an agent and project folder — press 1–{sortedPresets.length} or Enter
             </p>
           </div>
@@ -152,7 +157,7 @@ export function AgentLauncherModal({
             type="button"
             onClick={onClose}
             aria-label="Close launcher"
-            className="h-7 w-7 flex items-center justify-center rounded-md text-[#7E889E] hover:text-[#E6EAF2] hover:bg-[#1C2130] transition-colors cursor-pointer"
+            className="h-7 w-7 flex items-center justify-center rounded-md text-[var(--velox-ink-soft)] hover:text-[var(--velox-ink)] hover:bg-[var(--velox-hover)] transition-colors cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -179,19 +184,24 @@ export function AgentLauncherModal({
                     borderColor: selected
                       ? preset.accentColor
                       : "rgba(255, 255, 255, 0.07)",
+                    boxShadow: selected
+                      ? `0 0 0 1px color-mix(in srgb, ${preset.accentColor} 35%, transparent), 0 8px 20px -12px ${preset.accentColor}`
+                      : undefined,
                   }}
-                  className={`text-left px-3 py-2.5 rounded-lg border transition-colors flex items-start gap-2.5 cursor-pointer ${
-                    selected ? "bg-[#1C2233]" : "bg-[#11141C] hover:bg-[#181D2B]"
+                  className={`text-left px-3 py-2.5 rounded-xl border transition-all duration-150 active:scale-[0.985] flex items-start gap-2.5 cursor-pointer ${
+                    selected
+                      ? "bg-[var(--velox-active)]"
+                      : "bg-[var(--velox-canvas)]/75 hover:bg-[var(--velox-elevated)]"
                   }`}
                 >
-                  <div className="mt-0.5 w-7 h-7 rounded-md bg-[#0B0D12] border border-white/[0.06] flex items-center justify-center shrink-0">
+                  <div className="mt-0.5 w-7 h-7 rounded-lg bg-[var(--velox-canvas)] border border-white/[0.07] flex items-center justify-center shrink-0">
                     <AgentIcon kind={preset.kind} className="w-4 h-4" active />
                   </div>
 
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-1.5">
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="text-[13px] font-medium text-[#E6EAF2] truncate">
+                        <span className="text-[13px] font-medium text-[var(--velox-ink)] truncate">
                           {preset.label}
                         </span>
                         {preset.profile && (
@@ -208,13 +218,11 @@ export function AgentLauncherModal({
                           </span>
                         )}
                       </div>
-                      <span className="text-[10.5px] font-mono text-[#64708A] shrink-0">
-                        {index + 1}
-                      </span>
+                      <span className="velox-kbd shrink-0">{index + 1}</span>
                     </div>
 
                     <div className="flex items-center gap-1.5 mt-0.5">
-                      <p className="text-[11.5px] text-[#7E889E] truncate">
+                      <p className="text-[11.5px] text-[var(--velox-ink-soft)] truncate">
                         {preset.description}
                       </p>
                       {!preset.installed && (
@@ -231,7 +239,7 @@ export function AgentLauncherModal({
 
           {/* Folder picker + recent dirs */}
           <div>
-            <label className="block text-[12px] font-medium text-[#98A2B8] mb-1.5">
+            <label className="block text-[12px] font-medium text-[var(--velox-ink-secondary)] mb-1.5">
               Workspace folder
             </label>
             <div className="flex gap-2">
@@ -244,15 +252,15 @@ export function AgentLauncherModal({
                   if (browseError) setBrowseError(null);
                 }}
                 placeholder="C:\Users\..."
-                className="flex-1 h-9 px-3 rounded-lg bg-[#0B0D12] border border-white/[0.08] focus:border-[#4E8DF5]/60 text-[12.5px] font-mono text-[#E6EAF2] placeholder:text-[#52607A] outline-none"
+                className="flex-1 h-9 px-3 rounded-lg bg-[var(--velox-canvas)] border border-white/[0.08] focus:border-[var(--velox-accent)]/60 text-[12.5px] font-mono text-[var(--velox-ink)] placeholder:text-[var(--velox-ink-faint)] outline-none transition-colors"
               />
               <button
                 type="button"
                 disabled={browsing}
                 onClick={() => void handleBrowse()}
-                className="h-9 px-3 rounded-lg bg-[#1C2130] hover:bg-[#232A3D] border border-white/[0.08] text-[12.5px] text-[#E6EAF2] inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                className="h-9 px-3 rounded-lg bg-[var(--velox-elevated)] hover:bg-[var(--velox-hover)] active:scale-[0.97] border border-white/[0.08] text-[12.5px] text-[var(--velox-ink)] inline-flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
               >
-                <FolderOpen className="w-3.5 h-3.5 text-[#98A2B8]" />
+                <FolderOpen className="w-3.5 h-3.5 text-[var(--velox-ink-secondary)]" />
                 <span>{browsing ? "..." : "Browse"}</span>
               </button>
             </div>
@@ -271,10 +279,10 @@ export function AgentLauncherModal({
                     type="button"
                     onClick={() => setCwd(dir)}
                     title={dir}
-                    className={`px-2 py-0.5 rounded text-[11px] font-mono border transition-colors cursor-pointer ${
+                    className={`px-2 py-0.5 rounded-md text-[11px] font-mono border transition-colors cursor-pointer ${
                       cwd.toLowerCase() === dir.toLowerCase()
-                        ? "bg-[#1F2638] border-[#4E8DF5]/40 text-[#9CC2FF]"
-                        : "bg-[#11141C] border-white/[0.06] text-[#7E889E] hover:text-[#E6EAF2] hover:border-white/[0.12]"
+                        ? "bg-[var(--velox-active)] border-[var(--velox-accent)]/45 text-[var(--velox-accent-soft)]"
+                        : "bg-[var(--velox-canvas)]/70 border-white/[0.06] text-[var(--velox-ink-soft)] hover:text-[var(--velox-ink)] hover:border-white/[0.14]"
                     }`}
                   >
                     {getShortPath(dir)}
@@ -286,7 +294,7 @@ export function AgentLauncherModal({
 
           {/* Optional custom title */}
           <div>
-            <label className="block text-[12px] font-medium text-[#98A2B8] mb-1.5">
+            <label className="block text-[12px] font-medium text-[var(--velox-ink-secondary)] mb-1.5">
               Session label (optional)
             </label>
             <input
@@ -294,17 +302,17 @@ export function AgentLauncherModal({
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Defaults to folder name"
-              className="w-full h-9 px-3 rounded-lg bg-[#0B0D12] border border-white/[0.08] focus:border-[#4E8DF5]/60 text-[12.5px] text-[#E6EAF2] placeholder:text-[#52607A] outline-none"
+              className="w-full h-9 px-3 rounded-lg bg-[var(--velox-canvas)] border border-white/[0.08] focus:border-[var(--velox-accent)]/60 text-[12.5px] text-[var(--velox-ink)] placeholder:text-[var(--velox-ink-faint)] outline-none transition-colors"
             />
           </div>
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 bg-[#11141C]/80 border-t border-white/[0.07] flex items-center justify-end gap-2">
+        <div className="px-5 py-3 bg-[var(--velox-canvas)]/60 border-t border-white/[0.07] flex items-center justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="h-8 px-3.5 rounded-lg text-[12.5px] text-[#98A2B8] hover:text-[#E6EAF2] hover:bg-[#1C2130] transition-colors cursor-pointer"
+            className="h-8 px-3.5 rounded-lg text-[12.5px] text-[var(--velox-ink-secondary)] hover:text-[var(--velox-ink)] hover:bg-[var(--velox-hover)] transition-colors cursor-pointer"
           >
             Cancel
           </button>
@@ -320,7 +328,12 @@ export function AgentLauncherModal({
                 );
               }
             }}
-            className="h-8 px-4 rounded-lg bg-[#4E8DF5] hover:bg-[#5E98F7] text-[#080B12] text-[12.5px] font-semibold transition-colors cursor-pointer disabled:opacity-40"
+            style={
+              activePreset
+                ? { backgroundColor: activePreset.accentColor }
+                : undefined
+            }
+            className="h-8 px-4 rounded-lg bg-[var(--velox-accent)] hover:brightness-110 active:scale-[0.98] text-[#080B12] text-[12.5px] font-semibold transition-all cursor-pointer disabled:opacity-40"
           >
             Launch {activePreset?.label ?? "agent"}
           </button>

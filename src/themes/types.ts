@@ -46,9 +46,31 @@ export interface Scene {
   layers: SceneLayer[];
 }
 
+export type CustomThemeId =
+  | "tokyo-night"
+  | "catppuccin"
+  | "synthwave"
+  | "nord"
+  | "dracula"
+  | "gruvbox"
+  | "matrix";
+
+export type AgentThemeId = "default" | "claude" | "agy" | "codex" | "opencode" | CustomThemeId;
+
+export type ThemePreference = "auto" | AgentThemeId;
+
+export interface ThemeMeta {
+  id: ThemePreference;
+  label: string;
+  description: string;
+  category: "auto" | "custom" | "agent";
+  /** [canvas, surface, accent, accentSoft] preview dots */
+  swatches: readonly [string, string, string, string];
+}
+
 export interface AgentTheme {
   /** Used as the `data-agent-theme` attribute on the app root. */
-  id: "default" | "claude" | "agy";
+  id: AgentThemeId;
   /** Opaque CSS colour painted behind the canvas. */
   background: string;
   /** xterm palette. When `createScene` is set, `xterm.background` must be fully transparent. */
