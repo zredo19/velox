@@ -19,7 +19,8 @@ import {
 } from "./themes/registry";
 import type { ThemePreference } from "./themes/types";
 import type { AgentActivity } from "./lib/agentActivity";
-import type { AgentKind, SessionRecord, VeloxConfig } from "./types/ipc";
+import { veloxApi } from "./lib/tauri";
+import type { AgentKind, LocalMessageEvent, SessionRecord, VeloxConfig } from "./types/ipc";
 
 // Lazily code-split overlay modals & drawers to keep initial startup bundle lean
 const AgentLauncherModal = lazy(() =>
@@ -63,23 +64,11 @@ export function App() {
     renameSession,
     reorderSessions,
     updateConfig,
+    applyLoadedConfig,
   } = useSessions();
 
   const { telemetry, mcp, sleepMcpBackend, sleepAllMcps } =
     useSystemTelemetry();
-
-  const {
-    team,
-    tasks,
-    pendingIncoming,
-    localMessages,
-    error: teamError,
-    dismissLocalMessage,
-    setShared,
-    sendTask,
-    respond,
-    refresh: refreshTeam,
-  } = useTeam();
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [launcherOpen, setLauncherOpen] = useState(false);
@@ -99,13 +88,36 @@ export function App() {
   const [activity, setActivity] = useState<Record<string, AgentActivity | null>>({});
   const toastTimerRef = useRef<number | undefined>(undefined);
 
-  const showToast = useCallback((message: string) => {
+  const showToast = useCallback((message: string, durationMs = 2000) => {
     window.clearTimeout(toastTimerRef.current);
     setToast(message);
     toastTimerRef.current = window.setTimeout(() => {
       setToast(null);
-    }, 2000);
+    }, durationMs);
   }, []);
+
+  const handleRemoteAutoMessage = useCallback(
+    (ev: LocalMessageEvent) => {
+      if (ev.status === "delivered") {
+        const suffix = ev.preview ? `: ${ev.preview}` : "";
+        showToast(`${ev.fromTitle} → ${ev.toTitle}${suffix}`, 4500);
+      }
+    },
+    [showToast],
+  );
+
+  const {
+    team,
+    tasks,
+    pendingIncoming,
+    localMessages,
+    error: teamError,
+    dismissLocalMessage,
+    setShared,
+    sendTask,
+    respond,
+    refresh: refreshTeam,
+  } = useTeam({ onRemoteAutoMessage: handleRemoteAutoMessage });
 
   useEffect(() => () => window.clearTimeout(toastTimerRef.current), []);
 
@@ -360,6 +372,21 @@ export function App() {
     },
     [updateConfig, refreshTeam],
   );
+
+  const handleTogglePeerFullControl = useCallback(
+    async (peerName: string, enabled: boolean) => {
+      const saved = await veloxApi.setPeerFullControl(peerName, enabled);
+      applyLoadedConfig(saved);
+      void refreshTeam();
+      showToast(
+        enabled
+          ? `Control total solicitado con ${peerName}`
+          : `Control total desactivado con ${peerName}`,
+        3000,
+      );
+    },
+    [applyLoadedConfig, refreshTeam, showToast],
+  );
   // Global keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -566,6 +593,7 @@ export function App() {
                     sessionId={selectedRemote.sessionId}
                     remoteSession={selectedRemoteSession}
                     peerOnline={selectedPeerObj?.online ?? true}
+                    fullControlActive={Boolean(selectedPeerObj?.fullControlActive)}
                     tasks={tasks}
                     fontFamily={fontFamily}
                     fontSize={fontSize}
@@ -622,6 +650,7 @@ export function App() {
             team={team}
             themePreference={themePreference}
             onSelectTheme={handleSelectTheme}
+            onTogglePeerFullControl={handleTogglePeerFullControl}
             onSave={handleSaveConfig}
           />
         )}

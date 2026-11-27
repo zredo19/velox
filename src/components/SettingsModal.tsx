@@ -17,6 +17,7 @@ export interface SettingsModalProps {
   team?: TeamSnapshot | null;
   themePreference: ThemePreference;
   onSelectTheme: (pref: ThemePreference) => void;
+  onTogglePeerFullControl?: (peerName: string, enabled: boolean) => Promise<void>;
   onSave: (next: VeloxConfig) => Promise<void>;
 }
 
@@ -83,6 +84,7 @@ export function SettingsModal({
   team = null,
   themePreference,
   onSelectTheme,
+  onTogglePeerFullControl,
   onSave,
 }: SettingsModalProps) {
   const [draft, setDraft] = useState<VeloxConfig | null>(config);
@@ -96,7 +98,10 @@ export function SettingsModal({
         team: config.team
           ? {
               ...config.team,
-              peers: config.team.peers.map((p) => ({ ...p })),
+              peers: config.team.peers.map((p) => ({
+                ...p,
+                fullControl: Boolean(p.fullControl),
+              })),
             }
           : { ...DEFAULT_TEAM_CONFIG, peers: [] },
       });
@@ -540,6 +545,8 @@ export function SettingsModal({
             value={teamDraft}
             teamStatus={team}
             validation={teamValidation}
+            savedPeerNames={(config?.team?.peers ?? []).map((p) => p.name)}
+            onTogglePeerFullControl={onTogglePeerFullControl}
             onChange={(nextTeam) => {
               setSaveError(null);
               setDraft({ ...draft, team: nextTeam });

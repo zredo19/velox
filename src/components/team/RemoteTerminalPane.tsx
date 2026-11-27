@@ -8,8 +8,10 @@ import {
   ArrowLeft,
   Eye,
   Loader2,
+  Moon,
   RefreshCw,
   Send,
+  ShieldAlert,
   WifiOff,
 } from "lucide-react";
 import { decodeBase64ToBytes, veloxApi } from "../../lib/tauri";
@@ -27,6 +29,8 @@ export interface RemoteTerminalPaneProps {
   sessionId: string;
   remoteSession: RemoteSessionInfo | null;
   peerOnline: boolean;
+  /** True only when mutual "Control total" is active with this peer. */
+  fullControlActive: boolean;
   tasks: TaskTicket[];
   fontFamily: string;
   fontSize: number;
@@ -131,6 +135,7 @@ export function RemoteTerminalPane({
   sessionId,
   remoteSession,
   peerOnline,
+  fullControlActive,
   tasks,
   fontFamily,
   fontSize,
@@ -187,6 +192,11 @@ export function RemoteTerminalPane({
   const [taskText, setTaskText] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [inputError, setInputError] = useState<string | null>(null);
+
+  const canControl = fullControlActive && peerOnline && !sessionGone;
+  const canControlRef = useRef(canControl);
+  canControlRef.current = canControl;
 
   const effectiveKind = meta?.activeAgent ?? meta?.agentKind ?? "shell";
   const agentTheme = useMemo(
@@ -239,7 +249,19 @@ export function RemoteTerminalPane({
     term.refresh(0, Math.max(0, term.rows - 1));
   }, [agentTheme]);
 
-  // Mount read-only xterm, subscribe to remote stream, unsubscribe on unmount/change
+  // Toggle interactive keyboard control instantaneously without remounting xterm
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.disableStdin = !canControl;
+    term.options.cursorBlink = canControl;
+    if (!canControl) {
+      setInputError(null);
+    }
+  }, [canControl]);
+
+  // Mount xterm (interactive when mutual Control total is active, read-only otherwise),
+  // subscribe to remote stream, unsubscribe on unmount/change
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -253,13 +275,14 @@ export function RemoteTerminalPane({
     setConnecting(true);
     setSubscribeError(null);
     setSessionGone(false);
+    setInputError(null);
     setGridSize({ cols: initialCols, rows: initialRows });
 
     const term = new Terminal({
-      disableStdin: true,
+      disableStdin: !canControlRef.current,
       theme: agentTheme.xterm,
       allowTransparency: false,
-      cursorBlink: false,
+      cursorBlink: canControlRef.current,
       cursorStyle: "bar",
       scrollback: 5000,
       allowProposedApi: true,
@@ -279,20 +302,61 @@ export function RemoteTerminalPane({
 
     term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
       if (ev.type !== "keydown") return true;
-      if (
-        ev.ctrlKey &&
-        !ev.altKey &&
-        (ev.key.toLowerCase() === "c" ||
-          (ev.shiftKey && ev.key.toLowerCase() === "c"))
-      ) {
+      const key = ev.key.toLowerCase();
+
+      if (ev.ctrlKey && ev.shiftKey && !ev.altKey && key === "c") {
         const selection = term.getSelection();
         if (selection) {
           void navigator.clipboard.writeText(selection).catch(() => {});
-          if (!ev.shiftKey) term.clearSelection();
+        }
+        return false;
+      }
+
+      if (ev.ctrlKey && !ev.shiftKey && !ev.altKey && key === "c") {
+        const selection = term.getSelection();
+        if (selection) {
+          void navigator.clipboard.writeText(selection).catch(() => {});
+          term.clearSelection();
           return false;
         }
+        // Without a selection: send SIGINT (\x03) only when Control total is active
+        return canControlRef.current;
       }
-      return false;
+
+      if (!canControlRef.current) {
+        return false;
+      }
+
+      // Let browser fire native paste (xterm sends pasted text to onData)
+      if (ev.ctrlKey && !ev.altKey && key === "v") {
+        return false;
+      }
+
+      // Preserve Velox global shortcuts (handled by App window listener)
+      if (
+        ev.ctrlKey &&
+        !ev.altKey &&
+        (ev.shiftKey
+          ? ["n", "b", "m", "h", "p", "t"].includes(key)
+          : /^[n,k/0=+-1-9]$/.test(key))
+      ) {
+        return false;
+      }
+
+      return true;
+    });
+
+    const dataDisposable = term.onData((data) => {
+      if (!canControlRef.current) return;
+      void veloxApi.sendTeamInput(peer, sessionId, data).catch((err) => {
+        if (!disposed) {
+          setInputError(
+            err instanceof Error && err.message
+              ? err.message
+              : "No se pudo enviar entrada remota",
+          );
+        }
+      });
     });
 
     term.open(host);
@@ -320,7 +384,11 @@ export function RemoteTerminalPane({
     const pending: TeamPtyOutputEvent[] = [];
 
     const applyOutputChunk = (ev: TeamPtyOutputEvent) => {
-      if (ev.generation !== streamGen) return;
+      if (ev.generation < streamGen) return;
+      if (ev.generation !== streamGen) {
+        streamGen = ev.generation;
+        writtenEnd = 0;
+      }
       if (ev.endOffset <= writtenEnd) return;
       let bytes = decodeBase64ToBytes(ev.dataB64);
       const start = ev.endOffset - bytes.length;
@@ -428,6 +496,7 @@ export function RemoteTerminalPane({
       unlistenOutput?.();
       unlistenResize?.();
       unlistenGone?.();
+      dataDisposable.dispose();
       void veloxApi.teamUnsubscribe(peer, sessionId).catch(() => {});
       webglRef.current?.dispose();
       webglRef.current = null;
@@ -456,6 +525,13 @@ export function RemoteTerminalPane({
       if (selection) {
         void navigator.clipboard.writeText(selection).catch(() => {});
         term.clearSelection();
+      } else if (canControlRef.current) {
+        void navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (text && canControlRef.current) term.paste(text);
+          })
+          .catch(() => {});
       }
     },
     [],
@@ -577,10 +653,17 @@ export function RemoteTerminalPane({
           <span className="text-[11px] font-mono tabular-nums text-[var(--velox-ink-muted)] hidden sm:inline">
             {gridSize.cols}×{gridSize.rows}
           </span>
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white/[0.05] border border-white/[0.08] text-[11px] text-[var(--velox-ink-secondary)]">
-            <Eye className="w-3 h-3 text-[var(--velox-ink-muted)]" />
-            <span>Read-only</span>
-          </span>
+          {canControl ? (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/18 border border-amber-400/40 text-[11px] font-medium text-amber-200">
+              <ShieldAlert className="w-3 h-3 text-amber-300" />
+              <span>Control total</span>
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white/[0.05] border border-white/[0.08] text-[11px] text-[var(--velox-ink-secondary)]">
+              <Eye className="w-3 h-3 text-[var(--velox-ink-muted)]" />
+              <span>Read-only</span>
+            </span>
+          )}
         </div>
       </div>
 
@@ -660,6 +743,16 @@ export function RemoteTerminalPane({
             </div>
           )}
 
+          {/* Sleeping shared session hint (under Control total, sending a task or typing wakes it) */}
+          {meta?.status === "sleeping" && !connecting && !subscribeError && !sessionGone && (
+            <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 px-3.5 py-1.5 rounded-full bg-[var(--velox-elevated)]/95 border border-white/[0.1] text-[11.5px] text-[var(--velox-ink-secondary)] inline-flex items-center gap-2 shadow-lg">
+              <Moon className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+              <span>
+                Sesión dormida · envía una tarea o escribe en la terminal para despertarla
+              </span>
+            </div>
+          )}
+
           {/* Session gone overlay */}
           {sessionGone && (
             <div className="absolute inset-0 flex items-center justify-center bg-[var(--velox-canvas)]/88 backdrop-blur-[1px] p-6">
@@ -736,15 +829,17 @@ export function RemoteTerminalPane({
 
         <div className="flex items-center justify-between gap-3 text-[11px]">
           <span className="text-[var(--velox-ink-muted)]">
-            They review it before it runs.{" "}
+            {canControl
+              ? "Control total activo · las tareas llegan directo y tu teclado controla esta terminal. "
+              : "They review it before it runs. "}
             <span className="hidden sm:inline text-[var(--velox-ink-faint)]">
               Ctrl+Enter to send
             </span>
           </span>
 
           <div className="min-w-0 truncate">
-            {sendError ? (
-              <span className="text-rose-300">{sendError}</span>
+            {sendError || inputError ? (
+              <span className="text-rose-300">{sendError ?? inputError}</span>
             ) : ticketStatus ? (
               <span className={ticketStatus.toneClass}>{ticketStatus.text}</span>
             ) : null}

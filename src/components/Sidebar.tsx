@@ -686,11 +686,18 @@ export const Sidebar = memo(function Sidebar({
                 <button
                   type="button"
                   onClick={() => onSelectSession(msg.toSessionId)}
-                  className="flex-1 min-w-0 flex items-center gap-1 text-left text-[var(--velox-ink)] hover:text-[var(--velox-accent-soft)] transition-colors cursor-pointer"
+                  className="flex-1 min-w-0 text-left text-[var(--velox-ink)] hover:text-[var(--velox-accent-soft)] transition-colors cursor-pointer"
                 >
-                  <span className="truncate font-medium">{msg.fromTitle}</span>
-                  <ArrowRight className="w-3 h-3 shrink-0 text-[var(--velox-accent-soft)]" />
-                  <span className="truncate font-medium">{msg.toTitle}</span>
+                  <div className="flex items-center gap-1 min-w-0">
+                    <span className="truncate font-medium">{msg.fromTitle}</span>
+                    <ArrowRight className="w-3 h-3 shrink-0 text-[var(--velox-accent-soft)]" />
+                    <span className="truncate font-medium">{msg.toTitle}</span>
+                  </div>
+                  {msg.isRemote && msg.preview && (
+                    <div className="truncate text-[10.5px] font-mono text-[var(--velox-ink-muted)] mt-0.5">
+                      {msg.preview}
+                    </div>
+                  )}
                 </button>
                 {statusLabel && (
                   <span

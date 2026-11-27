@@ -194,6 +194,7 @@ async fn handle_socket(
     let _ = tx.try_send(ServerMsg::Hello {
         protocol: PROTOCOL_VERSION,
         peer_name: hub.display_name(),
+        full_control: false,
     });
     let _ = tx.try_send(ServerMsg::Sessions {
         sessions: hub.shared_sessions(),
@@ -279,6 +280,7 @@ async fn handle_socket(
                     Ok(ClientMsg::Hello {
                         protocol,
                         peer_name,
+                        full_control,
                     }) => {
                         if protocol != PROTOCOL_VERSION {
                             let _ = tx.try_send(ServerMsg::Error {
@@ -288,13 +290,22 @@ async fn handle_socket(
                             });
                             break;
                         }
-                        hub.set_connection_peer_name(conn_id, peer_name);
+                        hub.handle_client_hello(conn_id, peer_name, full_control);
+                    }
+                    Ok(ClientMsg::FullControl { enabled }) => {
+                        hub.handle_client_full_control(conn_id, enabled);
                     }
                     Ok(ClientMsg::Subscribe { session_id }) => {
                         hub.handle_subscribe(conn_id, &session_id);
                     }
                     Ok(ClientMsg::Unsubscribe { session_id }) => {
                         hub.handle_unsubscribe(conn_id, &session_id);
+                    }
+                    Ok(ClientMsg::TerminalInput {
+                        session_id,
+                        data_b64,
+                    }) => {
+                        hub.handle_terminal_input(conn_id, session_id, data_b64);
                     }
                     Ok(ClientMsg::TaskRequest {
                         request_id,

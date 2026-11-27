@@ -140,6 +140,8 @@ export interface PeerConfig {
   /** Tailscale MagicDNS name or IP (e.g. "benjamin" or "100.101.102.103"). */
   host: string;
   port: number;
+  /** Mutual "Control total" opt-in for this teammate (off by default). */
+  fullControl: boolean;
 }
 
 export interface TeamConfig {
@@ -182,6 +184,12 @@ export interface PeerStatus {
   displayName: string | null;
   lastError: string | null;
   sessions: RemoteSessionInfo[];
+  /** Whether THIS Velox enabled "Control total" for this peer. */
+  localFullControl: boolean;
+  /** Whether THAT peer announced "Control total" enabled for us. */
+  remoteFullControl: boolean;
+  /** Active ONLY when both sides enabled "Control total" for each other while connected. */
+  fullControlActive: boolean;
 }
 
 export interface TeamSnapshot {
@@ -195,6 +203,8 @@ export interface TeamSnapshot {
   localSessions: LocalSessionInfo[];
   /** Teammates currently connected to this machine. */
   watchers: string[];
+  /** Teammates with mutual "Control total" currently active. */
+  fullControlPeers: string[];
 }
 
 export type TaskState =
@@ -270,4 +280,6 @@ export interface LocalMessageEvent {
   wokeUp: boolean;
   preview: string;
   timestamp: string;
+  /** True when delivered automatically from a remote peer under mutual "Control total". */
+  isRemote?: boolean;
 }

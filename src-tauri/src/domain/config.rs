@@ -101,6 +101,10 @@ pub struct PeerConfig {
     /// Peer's team server port.
     #[serde(default = "default_team_port")]
     pub port: u16,
+    /// Opt-in mutual full control for this teammate (off by default).
+    /// Only activates when BOTH teammates enable it for each other.
+    #[serde(default)]
+    pub full_control: bool,
 }
 
 fn default_team_port() -> u16 {

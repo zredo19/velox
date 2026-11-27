@@ -10,6 +10,7 @@ use crate::team::hub::TeamHub;
 use crate::team::protocol::{ClientMsg, ServerMsg, PROTOCOL_VERSION, WS_PATH};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -30,6 +31,7 @@ const OUT_CHANNEL_CAPACITY: usize = 64;
 pub struct PeerClient {
     peer: PeerConfig,
     hub: Weak<TeamHub>,
+    local_full_control: AtomicBool,
     tx: Mutex<Option<mpsc::Sender<ClientMsg>>>,
     active_mirrors: Mutex<HashSet<String>>,
     pending_reads: Mutex<HashMap<String, oneshot::Sender<Result<String, String>>>>,
@@ -46,9 +48,11 @@ impl PeerClient {
         hub: Arc<TeamHub>,
     ) -> Arc<Self> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let initial_fc = peer.full_control;
         let client = Arc::new(Self {
             peer: peer.clone(),
             hub: Arc::downgrade(&hub),
+            local_full_control: AtomicBool::new(initial_fc),
             tx: Mutex::new(None),
             active_mirrors: Mutex::new(HashSet::new()),
             pending_reads: Mutex::new(HashMap::new()),
@@ -106,6 +110,34 @@ impl PeerClient {
                 session_id: session_id.to_string(),
             });
         }
+    }
+
+    pub fn set_full_control(&self, enabled: bool) {
+        self.local_full_control.store(enabled, Ordering::SeqCst);
+        if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let _ = tx.try_send(ClientMsg::FullControl { enabled });
+        }
+    }
+
+    pub fn send_terminal_input(&self, session_id: String, data_b64: String) -> VeloxResult<()> {
+        let tx = self
+            .tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or_else(|| {
+                VeloxError::InvalidInput(format!("Peer '{}' is offline", self.peer.name))
+            })?;
+        tx.try_send(ClientMsg::TerminalInput {
+            session_id,
+            data_b64,
+        })
+        .map_err(|_| {
+            VeloxError::InvalidInput(format!(
+                "Peer '{}' connection is congested or closed",
+                self.peer.name
+            ))
+        })
     }
 
     pub fn send_task(
@@ -248,6 +280,7 @@ impl PeerClient {
             let _ = out_tx.try_send(ClientMsg::Hello {
                 protocol: PROTOCOL_VERSION,
                 peer_name: display_name.clone(),
+                full_control: self.local_full_control.load(Ordering::SeqCst),
             });
             let mirrors: Vec<String> = self
                 .active_mirrors
@@ -352,13 +385,17 @@ impl PeerClient {
             ServerMsg::Hello {
                 protocol,
                 peer_name,
+                full_control,
             } => {
                 if protocol != PROTOCOL_VERSION {
                     return Err(format!(
                         "Protocol mismatch: expected {PROTOCOL_VERSION}, got {protocol}"
                     ));
                 }
-                hub.set_peer_hello(&self.peer.name, peer_name);
+                hub.set_peer_hello(&self.peer.name, peer_name, full_control);
+            }
+            ServerMsg::FullControl { enabled } => {
+                hub.set_peer_remote_full_control(&self.peer.name, enabled);
             }
             ServerMsg::Sessions { sessions } => {
                 hub.set_peer_sessions(&self.peer.name, sessions);

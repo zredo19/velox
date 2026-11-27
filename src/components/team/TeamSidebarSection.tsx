@@ -67,6 +67,14 @@ export function TeamSidebarSection({
                 <span className="truncate font-medium text-[var(--velox-ink-secondary)]">
                   {peer.name}
                 </span>
+                {peer.fullControlActive && (
+                  <span
+                    title="Control total mutuo activo"
+                    className="shrink-0 px-1 py-0 rounded bg-amber-500/18 border border-amber-400/35 text-[9.5px] font-medium text-amber-300"
+                  >
+                    control
+                  </span>
+                )}
               </div>
               <span className="font-mono text-[10.5px] tabular-nums shrink-0">
                 {peer.sessions.length}

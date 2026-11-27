@@ -18,7 +18,7 @@ use crate::team::client::PeerClient;
 use crate::team::delivery::{build_task_input, CHUNK_DELAY_MS};
 use crate::team::protocol::{
     RemoteSessionInfo, ServerMsg, TaskState, MAX_READ_LINES, MAX_SNAPSHOT_BYTES,
-    MAX_TASK_TEXT_BYTES,
+    MAX_TASK_TEXT_BYTES, MAX_TERMINAL_INPUT_BYTES,
 };
 use crate::team::server::spawn_server;
 use crate::team::summary::last_action_summary;
@@ -125,12 +125,28 @@ struct PeerRuntimeState {
     display_name: Option<String>,
     last_error: Option<String>,
     sessions: Vec<RemoteSessionInfo>,
+    remote_full_control: bool,
 }
 
 struct ConnectionEntry {
     tx: mpsc::Sender<ServerMsg>,
     peer_name: Option<String>,
+    remote_full_control: bool,
+    last_sent_full_control: Option<bool>,
+    last_sent_include_sleeping: bool,
     task_timestamps: VecDeque<Instant>,
+}
+
+/// Mutual "Control total" rule: active ONLY when BOTH teammates have enabled it for each other.
+pub fn is_mutual_full_control(local_enabled: bool, remote_enabled: bool) -> bool {
+    local_enabled && remote_enabled
+}
+
+fn peers_topology_eq(a: &[PeerConfig], b: &[PeerConfig]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.name == y.name && x.host == y.host && x.port == y.port)
 }
 
 enum SubPhase {
@@ -213,6 +229,8 @@ pub struct TeamHub {
     peer_states: RwLock<HashMap<String, PeerRuntimeState>>,
     local_sessions: RwLock<Vec<LocalSessionInfo>>,
     shared_live_ids: RwLock<HashSet<String>>,
+    shared_all_sessions: RwLock<Vec<RemoteSessionInfo>>,
+    shared_all_ids: RwLock<HashSet<String>>,
     connections: Mutex<HashMap<u64, ConnectionEntry>>,
     next_conn_id: AtomicU64,
     subscribers: Mutex<SubscriberState>,
@@ -244,6 +262,8 @@ impl TeamHub {
             peer_states: RwLock::new(HashMap::new()),
             local_sessions: RwLock::new(Vec::new()),
             shared_live_ids: RwLock::new(HashSet::new()),
+            shared_all_sessions: RwLock::new(Vec::new()),
+            shared_all_ids: RwLock::new(HashSet::new()),
             connections: Mutex::new(HashMap::new()),
             next_conn_id: AtomicU64::new(1),
             subscribers: Mutex::new(SubscriberState::default()),
@@ -296,15 +316,28 @@ impl TeamHub {
         let clients_changed = prev.enabled != next.enabled
             || prev.token != next.token
             || prev.display_name != next.display_name
-            || prev.peers != next.peers;
+            || !peers_topology_eq(&prev.peers, &next.peers);
 
         if server_changed {
             self.restart_server().await;
         }
         if clients_changed {
             self.restart_clients().await;
+        } else {
+            // Hot-toggle full_control over existing PeerClient sockets without tearing down mirrors.
+            let mut lc = self.lifecycle.lock().await;
+            for (peer_cfg, client) in lc.peers.iter_mut() {
+                if let Some(updated) = next.peers.iter().find(|p| p.name == peer_cfg.name) {
+                    if peer_cfg.full_control != updated.full_control {
+                        peer_cfg.full_control = updated.full_control;
+                        client.set_full_control(updated.full_control);
+                    }
+                }
+            }
         }
 
+        // Immediately propagate full_control changes to every connected inbound teammate.
+        self.sync_inbound_full_control();
         self.emit_snapshot_always();
     }
 
@@ -363,6 +396,54 @@ impl TeamHub {
         let client = self.find_peer_client(peer).await?;
         client.unsubscribe(session_id);
         Ok(())
+    }
+
+    /// Sends raw terminal keyboard bytes to a teammate's shared session.
+    /// Enforces mutual "Control total" on the client side too (in addition to server enforcement).
+    pub async fn send_remote_input(
+        &self,
+        peer: &str,
+        session_id: &str,
+        data: &str,
+    ) -> VeloxResult<()> {
+        let bytes = data.as_bytes();
+        if bytes.is_empty() || bytes.len() > MAX_TERMINAL_INPUT_BYTES {
+            return Err(VeloxError::InvalidInput(format!(
+                "Terminal input must be 1..={MAX_TERMINAL_INPUT_BYTES} bytes"
+            )));
+        }
+
+        let cfg = self.config_snapshot();
+        if !cfg.enabled || cfg.token.trim().is_empty() {
+            return Err(VeloxError::InvalidInput(
+                "Team mode is disabled or token is empty".to_string(),
+            ));
+        }
+
+        let peer_cfg = cfg
+            .peers
+            .iter()
+            .find(|p| p.name == peer)
+            .ok_or_else(|| VeloxError::InvalidInput(format!("Unknown peer: {peer}")))?;
+
+        let (online, remote_fc) = {
+            let ps = self.peer_states.read().unwrap_or_else(|e| e.into_inner());
+            ps.get(peer)
+                .map(|st| (st.online, st.remote_full_control))
+                .unwrap_or((false, false))
+        };
+
+        if !online {
+            return Err(VeloxError::InvalidInput(format!("Peer '{peer}' is offline")));
+        }
+        if !is_mutual_full_control(peer_cfg.full_control, remote_fc) {
+            return Err(VeloxError::InvalidInput(format!(
+                "Control total is not active with '{peer}'"
+            )));
+        }
+
+        let client = self.find_peer_client(peer).await?;
+        client.send_terminal_input(session_id.to_string(), BASE64.encode(bytes))
     }
 
     pub fn list_tasks(&self) -> Vec<TaskTicket> {
@@ -583,9 +664,14 @@ impl TeamHub {
 
     async fn refresh_local_sessions(&self) {
         let raw_sessions = self.sessions.list_sessions();
-        let live: Vec<SessionRecord> = raw_sessions
+        let non_exited: Vec<SessionRecord> = raw_sessions
             .into_iter()
+            .filter(|s| s.status != SessionStatus::Exited)
+            .collect();
+        let live: Vec<SessionRecord> = non_exited
+            .iter()
             .filter(|s| is_live_status(s.status))
+            .cloned()
             .collect();
 
         // Determine which sessions need summary recomputation (cached 5 s).
@@ -641,40 +727,50 @@ impl TeamHub {
 
         let live_ids: HashSet<String> = live.iter().map(|s| s.id.clone()).collect();
         let mut next_local = Vec::with_capacity(live.len());
-        let mut next_shared_ids = HashSet::new();
+        let mut next_shared_live_ids = HashSet::new();
+        let mut next_shared_all = Vec::new();
+        let mut next_shared_all_ids = HashSet::new();
 
         {
             let mut cache = self.summary_cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.retain(|id, _| live_ids.contains(id));
 
-            for s in live {
+            for s in non_exited {
                 let (cols, rows) = self
                     .sessions
                     .pty_size(&s.id)
                     .unwrap_or((DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS));
                 let summary = cache.get(&s.id).and_then(|e| e.summary.clone());
+                let is_live = is_live_status(s.status);
+                let info = RemoteSessionInfo {
+                    id: s.id.clone(),
+                    title: s.title,
+                    agent_kind: s.agent_kind,
+                    active_agent: s.active_agent,
+                    status: s.status,
+                    folder: cwd_basename(&s.cwd),
+                    last_active_at: s.last_active_at,
+                    summary,
+                    cols,
+                    rows,
+                };
                 if s.shared {
-                    next_shared_ids.insert(s.id.clone());
+                    next_shared_all_ids.insert(s.id.clone());
+                    next_shared_all.push(info.clone());
+                    if is_live {
+                        next_shared_live_ids.insert(s.id.clone());
+                    }
                 }
-                next_local.push(LocalSessionInfo {
-                    info: RemoteSessionInfo {
-                        id: s.id,
-                        title: s.title,
-                        agent_kind: s.agent_kind,
-                        active_agent: s.active_agent,
-                        status: s.status,
-                        folder: cwd_basename(&s.cwd),
-                        last_active_at: s.last_active_at,
-                        summary,
-                        cols,
-                        rows,
-                    },
-                    shared: s.shared,
-                });
+                if is_live {
+                    next_local.push(LocalSessionInfo {
+                        info,
+                        shared: s.shared,
+                    });
+                }
             }
         }
 
-        let prev_shared: Vec<RemoteSessionInfo> = {
+        let prev_shared_live: Vec<RemoteSessionInfo> = {
             self.local_sessions
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
@@ -683,15 +779,27 @@ impl TeamHub {
                 .map(|s| s.info.clone())
                 .collect()
         };
+        let prev_shared_all: Vec<RemoteSessionInfo> = {
+            self.shared_all_sessions
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        };
 
-        let next_shared: Vec<RemoteSessionInfo> = next_local
+        let next_shared_live: Vec<RemoteSessionInfo> = next_local
             .iter()
             .filter(|s| s.shared)
             .map(|s| s.info.clone())
             .collect();
 
-        let prev_shared_ids: HashSet<String> = {
+        let prev_shared_live_ids: HashSet<String> = {
             self.shared_live_ids
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        };
+        let prev_shared_all_ids: HashSet<String> = {
+            self.shared_all_ids
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
@@ -704,17 +812,34 @@ impl TeamHub {
         *self
             .shared_live_ids
             .write()
-            .unwrap_or_else(|e| e.into_inner()) = next_shared_ids.clone();
+            .unwrap_or_else(|e| e.into_inner()) = next_shared_live_ids.clone();
+        *self
+            .shared_all_sessions
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = next_shared_all.clone();
+        *self
+            .shared_all_ids
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = next_shared_all_ids.clone();
 
-        // Notify subscribers of sessions that were unshared / slept / closed.
-        for gone_id in prev_shared_ids.difference(&next_shared_ids) {
+        // Notify ALL subscribers of sessions that were unshared / exited / closed.
+        for gone_id in prev_shared_all_ids.difference(&next_shared_all_ids) {
             self.notify_session_gone(gone_id);
         }
+        // Sessions that went to sleep (still shared): drop non-full-control subscribers only.
+        for slept_id in prev_shared_live_ids.difference(&next_shared_live_ids) {
+            if next_shared_all_ids.contains(slept_id) {
+                self.notify_session_gone_non_full_control(slept_id);
+            }
+        }
 
-        if prev_shared != next_shared {
-            self.broadcast_to_connections(ServerMsg::Sessions {
-                sessions: next_shared,
-            });
+        let live_changed = prev_shared_live != next_shared_live;
+        let all_changed = prev_shared_all != next_shared_all;
+        if live_changed || all_changed {
+            self.broadcast_sessions_to_connections(
+                live_changed.then_some(&next_shared_live),
+                all_changed.then_some(&next_shared_all),
+            );
         }
     }
 
@@ -769,23 +894,45 @@ impl TeamHub {
     }
 
     pub(crate) fn shared_sessions(&self) -> Vec<RemoteSessionInfo> {
-        let cached = self
-            .local_sessions
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        if !cached.is_empty() {
-            return cached
-                .iter()
-                .filter(|s| s.shared)
-                .map(|s| s.info.clone())
-                .collect();
+        self.shared_sessions_for_full_control(false)
+    }
+
+    pub(crate) fn shared_sessions_for_full_control(
+        &self,
+        include_sleeping: bool,
+    ) -> Vec<RemoteSessionInfo> {
+        if include_sleeping {
+            let cached = self
+                .shared_all_sessions
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            if !cached.is_empty() {
+                return cached.clone();
+            }
+            drop(cached);
+        } else {
+            let cached = self
+                .local_sessions
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            if !cached.is_empty() {
+                return cached
+                    .iter()
+                    .filter(|s| s.shared)
+                    .map(|s| s.info.clone())
+                    .collect();
+            }
+            drop(cached);
         }
-        drop(cached);
 
         self.sessions
             .list_sessions()
             .into_iter()
-            .filter(|s| is_live_status(s.status) && s.shared)
+            .filter(|s| {
+                s.shared
+                    && s.status != SessionStatus::Exited
+                    && (include_sleeping || is_live_status(s.status))
+            })
             .map(|s| {
                 let (cols, rows) = self
                     .sessions
@@ -807,6 +954,128 @@ impl TeamHub {
             .collect()
     }
 
+    /// Resolves whether THIS machine enabled `full_control` for the peer identified by `incoming_name`
+    /// (matched case-insensitively against `PeerConfig.name` or the peer's learned `displayName`).
+    fn local_full_control_for_peer_name(&self, incoming_name: &str) -> bool {
+        let cfg = self.config_snapshot();
+        if let Some(peer) = cfg
+            .peers
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(incoming_name))
+        {
+            return peer.full_control;
+        }
+        let ps = self.peer_states.read().unwrap_or_else(|e| e.into_inner());
+        for peer in &cfg.peers {
+            if ps
+                .get(&peer.name)
+                .and_then(|st| st.display_name.as_deref())
+                .is_some_and(|dn| dn.eq_ignore_ascii_case(incoming_name))
+            {
+                return peer.full_control;
+            }
+        }
+        false
+    }
+
+    fn is_conn_mutual_full_control(&self, conn_id: u64) -> bool {
+        let (peer_name, remote_fc) = {
+            let conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+            match conns.get(&conn_id) {
+                Some(c) => (c.peer_name.clone(), c.remote_full_control),
+                None => return false,
+            }
+        };
+        let Some(name) = peer_name else {
+            return false;
+        };
+        let local_fc = self.local_full_control_for_peer_name(&name);
+        is_mutual_full_control(local_fc, remote_fc)
+    }
+
+    fn sync_inbound_full_control(&self) {
+        let conn_peers: Vec<(u64, String, bool)> = {
+            self.connections
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter_map(|(&cid, c)| {
+                    c.peer_name
+                        .as_ref()
+                        .map(|n| (cid, n.clone(), c.remote_full_control))
+                })
+                .collect()
+        };
+
+        let mut to_notify: Vec<(mpsc::Sender<ServerMsg>, bool, Option<bool>)> = Vec::new();
+        let mut drop_sleeping_conns: Vec<u64> = Vec::new();
+
+        for (cid, name, remote_fc) in conn_peers {
+            let local_fc = self.local_full_control_for_peer_name(&name);
+            let mutual = is_mutual_full_control(local_fc, remote_fc);
+            let mut conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = conns.get_mut(&cid) {
+                let fc_changed = entry.last_sent_full_control != Some(local_fc);
+                let sleep_vis_changed = entry.last_sent_include_sleeping != mutual;
+                if fc_changed || sleep_vis_changed {
+                    entry.last_sent_full_control = Some(local_fc);
+                    entry.last_sent_include_sleeping = mutual;
+                    to_notify.push((
+                        entry.tx.clone(),
+                        local_fc,
+                        sleep_vis_changed.then_some(mutual),
+                    ));
+                    if sleep_vis_changed && !mutual {
+                        drop_sleeping_conns.push(cid);
+                    }
+                }
+            }
+        }
+
+        for cid in drop_sleeping_conns {
+            self.drop_sleeping_subs_for_conn(cid);
+        }
+
+        for (tx, local_fc, sessions_vis) in to_notify {
+            let _ = tx.try_send(ServerMsg::FullControl { enabled: local_fc });
+            if let Some(include_sleeping) = sessions_vis {
+                let _ = tx.try_send(ServerMsg::Sessions {
+                    sessions: self.shared_sessions_for_full_control(include_sleeping),
+                });
+            }
+        }
+    }
+
+    fn drop_sleeping_subs_for_conn(&self, conn_id: u64) {
+        let live_ids: HashSet<String> = self
+            .sessions
+            .list_sessions()
+            .into_iter()
+            .filter(|s| is_live_status(s.status))
+            .map(|s| s.id)
+            .collect();
+
+        let mut gone: Vec<(mpsc::Sender<ServerMsg>, String)> = Vec::new();
+        {
+            let mut subs = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(set) = subs.lagged.get_mut(&conn_id) {
+                set.retain(|sid| live_ids.contains(sid));
+            }
+            subs.by_session.retain(|sid, map| {
+                if !live_ids.contains(sid) {
+                    if let Some(entry) = map.remove(&conn_id) {
+                        gone.push((entry.tx, sid.clone()));
+                    }
+                }
+                !map.is_empty()
+            });
+        }
+
+        for (tx, session_id) in gone {
+            let _ = tx.try_send(ServerMsg::SessionGone { session_id });
+        }
+    }
+
     pub(crate) fn register_connection(&self, tx: mpsc::Sender<ServerMsg>) -> u64 {
         let conn_id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
         self.connections
@@ -817,6 +1086,9 @@ impl TeamHub {
                 ConnectionEntry {
                     tx,
                     peer_name: None,
+                    remote_full_control: false,
+                    last_sent_full_control: None,
+                    last_sent_include_sleeping: false,
                     task_timestamps: VecDeque::new(),
                 },
             );
@@ -846,11 +1118,64 @@ impl TeamHub {
         }
     }
 
-    pub(crate) fn set_connection_peer_name(&self, conn_id: u64, peer_name: String) {
-        {
+    pub(crate) fn handle_client_hello(
+        &self,
+        conn_id: u64,
+        peer_name: String,
+        remote_full_control: bool,
+    ) {
+        let local_fc = self.local_full_control_for_peer_name(&peer_name);
+        let mutual = is_mutual_full_control(local_fc, remote_full_control);
+        let tx = {
             let mut conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = conns.get_mut(&conn_id) {
-                entry.peer_name = Some(peer_name);
+            let Some(entry) = conns.get_mut(&conn_id) else {
+                return;
+            };
+            entry.peer_name = Some(peer_name);
+            entry.remote_full_control = remote_full_control;
+            entry.last_sent_full_control = Some(local_fc);
+            entry.last_sent_include_sleeping = mutual;
+            entry.tx.clone()
+        };
+
+        let _ = tx.try_send(ServerMsg::FullControl { enabled: local_fc });
+        if mutual {
+            let _ = tx.try_send(ServerMsg::Sessions {
+                sessions: self.shared_sessions_for_full_control(true),
+            });
+        }
+        self.emit_snapshot_if_changed(false);
+    }
+
+    pub(crate) fn handle_client_full_control(&self, conn_id: u64, remote_full_control: bool) {
+        let peer_name = {
+            let conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+            conns.get(&conn_id).and_then(|c| c.peer_name.clone())
+        };
+        let local_fc = peer_name
+            .as_deref()
+            .map(|n| self.local_full_control_for_peer_name(n))
+            .unwrap_or(false);
+        let mutual = is_mutual_full_control(local_fc, remote_full_control);
+
+        let update = {
+            let mut conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+            conns.get_mut(&conn_id).map(|entry| {
+                entry.remote_full_control = remote_full_control;
+                let prev_inc = entry.last_sent_include_sleeping;
+                entry.last_sent_include_sleeping = mutual;
+                (entry.tx.clone(), prev_inc != mutual)
+            })
+        };
+
+        if let Some((tx, vis_changed)) = update {
+            if vis_changed {
+                if !mutual {
+                    self.drop_sleeping_subs_for_conn(conn_id);
+                }
+                let _ = tx.try_send(ServerMsg::Sessions {
+                    sessions: self.shared_sessions_for_full_control(mutual),
+                });
             }
         }
         self.emit_snapshot_if_changed(false);
@@ -865,16 +1190,58 @@ impl TeamHub {
             }
         };
 
-        let is_shared_live = self
+        let mutual_fc = self.is_conn_mutual_full_control(conn_id);
+        let target = self
             .sessions
             .list_sessions()
             .into_iter()
-            .any(|s| s.id == session_id && is_live_status(s.status) && s.shared);
+            .find(|s| {
+                s.id == session_id
+                    && s.shared
+                    && s.status != SessionStatus::Exited
+                    && (mutual_fc || is_live_status(s.status))
+            });
 
-        if !is_shared_live {
+        let Some(session) = target else {
             let _ = tx.try_send(ServerMsg::SessionGone {
                 session_id: session_id.to_string(),
             });
+            return;
+        };
+
+        // Shared sleeping session under mutual full control: register subscriber ready for wake.
+        if session.status == SessionStatus::Sleeping {
+            let (cols, rows) = self
+                .sessions
+                .pty_size(session_id)
+                .unwrap_or((DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS));
+            let snapshot_msg = ServerMsg::Snapshot {
+                session_id: session_id.to_string(),
+                generation: 0,
+                end_offset: 0,
+                data_b64: String::new(),
+                cols,
+                rows,
+            };
+            let mut subs = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(set) = subs.lagged.get_mut(&conn_id) {
+                set.remove(session_id);
+            }
+            if tx.try_send(snapshot_msg).is_ok() {
+                subs.by_session
+                    .entry(session_id.to_string())
+                    .or_default()
+                    .insert(
+                        conn_id,
+                        SubscriberEntry {
+                            tx,
+                            phase: SubPhase::Live {
+                                snap_generation: 0,
+                                snap_end_offset: 0,
+                            },
+                        },
+                    );
+            }
             return;
         }
 
@@ -1047,11 +1414,18 @@ impl TeamHub {
             return;
         }
 
+        let mutual_fc = self.is_conn_mutual_full_control(conn_id);
+
         let target = self
             .sessions
             .list_sessions()
             .into_iter()
-            .find(|s| s.id == session_id && is_live_status(s.status) && s.shared);
+            .find(|s| {
+                s.id == session_id
+                    && s.shared
+                    && s.status != SessionStatus::Exited
+                    && (mutual_fc || is_live_status(s.status))
+            });
 
         let Some(session) = target else {
             let _ = tx.try_send(ServerMsg::TaskUpdate {
@@ -1063,6 +1437,41 @@ impl TeamHub {
         };
 
         let now_str = Utc::now().to_rfc3339();
+        if mutual_fc {
+            let ticket = TaskTicket {
+                request_id: request_id.clone(),
+                direction: TaskDirection::Incoming,
+                peer: Some(from_name.clone()),
+                session_id: session.id.clone(),
+                session_title: Some(session.title.clone()),
+                from_name: from_name.clone(),
+                from_session,
+                text: text.clone(),
+                state: TaskState::Accepted,
+                message: Some("Control total".to_string()),
+                created_at: now_str.clone(),
+                updated_at: now_str,
+            };
+
+            self.insert_ticket(ticket, Some(conn_id));
+            self.notify_requester(Some(conn_id), &request_id, TaskState::Accepted, None);
+            self.emit_tasks_updated();
+
+            if let Some(hub) = self.self_weak.upgrade() {
+                spawn_on_runtime(async move {
+                    hub.deliver_auto_approved_remote_task(
+                        request_id,
+                        conn_id,
+                        from_name,
+                        session,
+                        text,
+                    )
+                    .await;
+                });
+            }
+            return;
+        }
+
         let ticket = TaskTicket {
             request_id: request_id.clone(),
             direction: TaskDirection::Incoming,
@@ -1080,6 +1489,293 @@ impl TeamHub {
 
         self.insert_ticket(ticket, Some(conn_id));
         self.emit_tasks_updated();
+    }
+
+    async fn deliver_auto_approved_remote_task(
+        self: Arc<Self>,
+        request_id: String,
+        conn_id: u64,
+        from_name: String,
+        session: SessionRecord,
+        text: String,
+    ) {
+        let preview = make_message_preview(&text);
+        let mut woke_up = false;
+
+        if session.status == SessionStatus::Sleeping {
+            match self
+                .sessions
+                .wake_session(&session.id, DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS)
+            {
+                Ok(_) => {
+                    woke_up = true;
+                    self.emit_local_message(
+                        &request_id,
+                        None,
+                        &from_name,
+                        &session.id,
+                        &session.title,
+                        LocalMessageStatus::Queued,
+                        true,
+                        &preview,
+                        true,
+                    );
+                }
+                Err(err) => {
+                    let msg = format!("Failed to wake sleeping session: {err}");
+                    self.update_ticket_state(&request_id, TaskState::Failed, Some(msg.clone()));
+                    self.notify_requester(Some(conn_id), &request_id, TaskState::Failed, Some(msg));
+                    self.emit_tasks_updated();
+                    self.emit_local_message(
+                        &request_id,
+                        None,
+                        &from_name,
+                        &session.id,
+                        &session.title,
+                        LocalMessageStatus::Failed,
+                        false,
+                        &preview,
+                        true,
+                    );
+                    return;
+                }
+            }
+
+            // Wait until the woken target session is ready for input (same readiness logic as local messaging).
+            let started_wait = Instant::now();
+            loop {
+                if self.shutting_down.load(Ordering::SeqCst) {
+                    let msg = "Velox is shutting down".to_string();
+                    self.update_ticket_state(&request_id, TaskState::Failed, Some(msg.clone()));
+                    self.notify_requester(Some(conn_id), &request_id, TaskState::Failed, Some(msg));
+                    self.emit_tasks_updated();
+                    return;
+                }
+                // Re-check mutual full control and shared flag before writing after wake.
+                if !self.is_conn_mutual_full_control(conn_id) {
+                    let msg = "Control total was turned off before delivery".to_string();
+                    self.update_ticket_state(&request_id, TaskState::Failed, Some(msg.clone()));
+                    self.notify_requester(Some(conn_id), &request_id, TaskState::Failed, Some(msg));
+                    self.emit_tasks_updated();
+                    self.emit_local_message(
+                        &request_id,
+                        None,
+                        &from_name,
+                        &session.id,
+                        &session.title,
+                        LocalMessageStatus::Failed,
+                        true,
+                        &preview,
+                        true,
+                    );
+                    return;
+                }
+                let current = self
+                    .sessions
+                    .list_sessions()
+                    .into_iter()
+                    .find(|s| s.id == session.id && s.shared);
+                match current {
+                    None => {
+                        let msg = "Target session is unavailable or no longer shared".to_string();
+                        self.update_ticket_state(&request_id, TaskState::Failed, Some(msg.clone()));
+                        self.notify_requester(
+                            Some(conn_id),
+                            &request_id,
+                            TaskState::Failed,
+                            Some(msg),
+                        );
+                        self.emit_tasks_updated();
+                        self.emit_local_message(
+                            &request_id,
+                            None,
+                            &from_name,
+                            &session.id,
+                            &session.title,
+                            LocalMessageStatus::Failed,
+                            true,
+                            &preview,
+                            true,
+                        );
+                        return;
+                    }
+                    Some(cur) => match self.check_local_target_readiness(&cur, true) {
+                        TargetReadiness::Ready => break,
+                        TargetReadiness::Gone(reason) => {
+                            self.update_ticket_state(
+                                &request_id,
+                                TaskState::Failed,
+                                Some(reason.clone()),
+                            );
+                            self.notify_requester(
+                                Some(conn_id),
+                                &request_id,
+                                TaskState::Failed,
+                                Some(reason),
+                            );
+                            self.emit_tasks_updated();
+                            self.emit_local_message(
+                                &request_id,
+                                None,
+                                &from_name,
+                                &session.id,
+                                &session.title,
+                                LocalMessageStatus::Failed,
+                                true,
+                                &preview,
+                                true,
+                            );
+                            return;
+                        }
+                        TargetReadiness::Wait(reason) => {
+                            if started_wait.elapsed() >= LOCAL_QUEUE_TIMEOUT {
+                                let msg = format!(
+                                    "Timed out waiting for \"{}\": {reason}",
+                                    session.title
+                                );
+                                self.update_ticket_state(
+                                    &request_id,
+                                    TaskState::Failed,
+                                    Some(msg.clone()),
+                                );
+                                self.notify_requester(
+                                    Some(conn_id),
+                                    &request_id,
+                                    TaskState::Failed,
+                                    Some(msg),
+                                );
+                                self.emit_tasks_updated();
+                                self.emit_local_message(
+                                    &request_id,
+                                    None,
+                                    &from_name,
+                                    &session.id,
+                                    &session.title,
+                                    LocalMessageStatus::Failed,
+                                    true,
+                                    &preview,
+                                    true,
+                                );
+                                return;
+                            }
+                            tokio::time::sleep(LOCAL_QUEUE_POLL_INTERVAL).await;
+                        }
+                    },
+                }
+            }
+        }
+
+        let latest_kind = self
+            .sessions
+            .list_sessions()
+            .into_iter()
+            .find(|s| s.id == session.id)
+            .map(|s| s.active_agent.unwrap_or(s.agent_kind))
+            .unwrap_or_else(|| session.active_agent.unwrap_or(session.agent_kind));
+
+        // Tasks stay sanitized via build_task_input inside write_prompt_to_pty.
+        let delivery_error = self
+            .write_prompt_to_pty(&session.id, latest_kind, &text)
+            .await
+            .err();
+
+        let (final_state, final_msg, toast_status) = match delivery_error {
+            None => (
+                TaskState::Delivered,
+                Some(if woke_up {
+                    "Control total (sesión despertada)".to_string()
+                } else {
+                    "Control total".to_string()
+                }),
+                LocalMessageStatus::Delivered,
+            ),
+            Some(err) => (TaskState::Failed, Some(err), LocalMessageStatus::Failed),
+        };
+
+        self.update_ticket_state(&request_id, final_state, final_msg.clone());
+        self.notify_requester(Some(conn_id), &request_id, final_state, final_msg);
+        self.emit_tasks_updated();
+        self.emit_local_message(
+            &request_id,
+            None,
+            &from_name,
+            &session.id,
+            &session.title,
+            toast_status,
+            woke_up,
+            &preview,
+            true,
+        );
+    }
+
+    pub(crate) fn handle_terminal_input(
+        &self,
+        conn_id: u64,
+        session_id: String,
+        data_b64: String,
+    ) {
+        let tx = {
+            let conns = self.connections.lock().unwrap_or_else(|e| e.into_inner());
+            match conns.get(&conn_id) {
+                Some(c) => c.tx.clone(),
+                None => return,
+            }
+        };
+
+        if !self.is_conn_mutual_full_control(conn_id) {
+            let _ = tx.try_send(ServerMsg::Error {
+                message: "Control total is not active; remote terminal input rejected".to_string(),
+            });
+            return;
+        }
+
+        let Ok(bytes) = BASE64.decode(&data_b64) else {
+            let _ = tx.try_send(ServerMsg::Error {
+                message: "Invalid base64 terminal input".to_string(),
+            });
+            return;
+        };
+        if bytes.is_empty() || bytes.len() > MAX_TERMINAL_INPUT_BYTES {
+            let _ = tx.try_send(ServerMsg::Error {
+                message: format!(
+                    "Terminal input must be 1..={MAX_TERMINAL_INPUT_BYTES} bytes"
+                ),
+            });
+            return;
+        }
+
+        let target = self
+            .sessions
+            .list_sessions()
+            .into_iter()
+            .find(|s| s.id == session_id && s.shared && s.status != SessionStatus::Exited);
+
+        let Some(session) = target else {
+            let _ = tx.try_send(ServerMsg::Error {
+                message: "Session is unavailable or not shared".to_string(),
+            });
+            return;
+        };
+
+        if session.status == SessionStatus::Sleeping {
+            if let Err(err) = self
+                .sessions
+                .wake_session(&session.id, DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS)
+            {
+                let _ = tx.try_send(ServerMsg::Error {
+                    message: format!("Failed to wake session: {err}"),
+                });
+                return;
+            }
+        }
+
+        // Under mutual full control, raw keyboard bytes (including Ctrl+C, arrows, ESC, Enter)
+        // go directly to the owner's shared PTY without control-character stripping.
+        if let Err(err) = self.sessions.write_pty_bytes(&session.id, &bytes) {
+            let _ = tx.try_send(ServerMsg::Error {
+                message: format!("Failed to write terminal input: {err}"),
+            });
+        }
     }
 
     pub(crate) fn handle_read_request(
@@ -1137,13 +1833,27 @@ impl TeamHub {
         self.emit_snapshot_if_changed(false);
     }
 
-    pub(crate) fn set_peer_hello(&self, peer_name: &str, display_name: String) {
+    pub(crate) fn set_peer_hello(&self, peer_name: &str, display_name: String, full_control: bool) {
         {
             let mut ps = self.peer_states.write().unwrap_or_else(|e| e.into_inner());
             let entry = ps.entry(peer_name.to_string()).or_default();
             entry.online = true;
             entry.display_name = Some(display_name);
             entry.last_error = None;
+            if full_control {
+                entry.remote_full_control = true;
+            }
+        }
+        // Re-sync inbound connections in case this peer was matched by its newly announced displayName.
+        self.sync_inbound_full_control();
+        self.emit_snapshot_if_changed(false);
+    }
+
+    pub(crate) fn set_peer_remote_full_control(&self, peer_name: &str, enabled: bool) {
+        {
+            let mut ps = self.peer_states.write().unwrap_or_else(|e| e.into_inner());
+            let entry = ps.entry(peer_name.to_string()).or_default();
+            entry.remote_full_control = enabled;
         }
         self.emit_snapshot_if_changed(false);
     }
@@ -1163,6 +1873,7 @@ impl TeamHub {
             let mut ps = self.peer_states.write().unwrap_or_else(|e| e.into_inner());
             let entry = ps.entry(peer_name.to_string()).or_default();
             entry.online = false;
+            entry.remote_full_control = false;
             entry.sessions.clear();
             entry.last_error = error;
         }
@@ -1351,17 +2062,73 @@ impl TeamHub {
         }
     }
 
-    fn broadcast_to_connections(&self, msg: ServerMsg) {
-        let txs: Vec<mpsc::Sender<ServerMsg>> = {
+    fn notify_session_gone_non_full_control(&self, session_id: &str) {
+        let conn_ids: Vec<u64> = {
+            let subs = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+            subs.by_session
+                .get(session_id)
+                .map(|m| m.keys().copied().collect())
+                .unwrap_or_default()
+        };
+        let to_drop: Vec<u64> = conn_ids
+            .into_iter()
+            .filter(|&cid| !self.is_conn_mutual_full_control(cid))
+            .collect();
+        if to_drop.is_empty() {
+            return;
+        }
+        let mut removed_txs = Vec::new();
+        {
+            let mut subs = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+            for cid in &to_drop {
+                if let Some(set) = subs.lagged.get_mut(cid) {
+                    set.remove(session_id);
+                }
+            }
+            if let Some(map) = subs.by_session.get_mut(session_id) {
+                for cid in &to_drop {
+                    if let Some(entry) = map.remove(cid) {
+                        removed_txs.push(entry.tx);
+                    }
+                }
+                if map.is_empty() {
+                    subs.by_session.remove(session_id);
+                }
+            }
+        }
+        for tx in removed_txs {
+            let _ = tx.try_send(ServerMsg::SessionGone {
+                session_id: session_id.to_string(),
+            });
+        }
+    }
+
+    fn broadcast_sessions_to_connections(
+        &self,
+        live_sessions: Option<&[RemoteSessionInfo]>,
+        all_sessions: Option<&[RemoteSessionInfo]>,
+    ) {
+        let conns: Vec<(u64, mpsc::Sender<ServerMsg>)> = {
             self.connections
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .values()
-                .map(|c| c.tx.clone())
+                .iter()
+                .map(|(&cid, c)| (cid, c.tx.clone()))
                 .collect()
         };
-        for tx in txs {
-            let _ = tx.try_send(msg.clone());
+        for (cid, tx) in conns {
+            let mutual = self.is_conn_mutual_full_control(cid);
+            if mutual {
+                if let Some(list) = all_sessions {
+                    let _ = tx.try_send(ServerMsg::Sessions {
+                        sessions: list.to_vec(),
+                    });
+                }
+            } else if let Some(list) = live_sessions {
+                let _ = tx.try_send(ServerMsg::Sessions {
+                    sessions: list.to_vec(),
+                });
+            }
         }
     }
 
@@ -1435,6 +2202,7 @@ impl TeamHub {
         status: LocalMessageStatus,
         woke_up: bool,
         preview: &str,
+        is_remote: bool,
     ) {
         self.emit_event(
             EVT_TEAM_LOCAL_MESSAGE,
@@ -1448,6 +2216,7 @@ impl TeamHub {
                 woke_up,
                 preview: preview.to_string(),
                 timestamp: Utc::now().to_rfc3339(),
+                is_remote,
             },
         );
     }
@@ -1652,6 +2421,7 @@ impl TeamHub {
                         final_status,
                         woke_up,
                         &preview,
+                        false,
                     );
 
                     let popped = {
@@ -1767,6 +2537,7 @@ impl TeamHub {
                         LocalMessageStatus::Delivered,
                         false,
                         &preview,
+                        false,
                     );
                     Ok(LocalMessageReceipt {
                         message_id,
@@ -1789,6 +2560,7 @@ impl TeamHub {
                         LocalMessageStatus::Failed,
                         false,
                         &preview,
+                        false,
                     );
                     Err(VeloxError::InvalidInput(err))
                 }
@@ -1829,6 +2601,7 @@ impl TeamHub {
             LocalMessageStatus::Queued,
             woke_up,
             &preview,
+            false,
         );
 
         if should_spawn && !self.spawn_local_queue_worker(&active_target.id) {
@@ -2019,11 +2792,52 @@ impl TeamApi for TeamHub {
             .read()
             .unwrap_or_else(|e| e.into_inner());
 
-        let peers = cfg
+        let conn_snapshot: Vec<(String, bool)> = {
+            self.connections
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .filter_map(|c| {
+                    c.peer_name
+                        .as_ref()
+                        .map(|n| (n.clone(), c.remote_full_control))
+                })
+                .collect()
+        };
+
+        let mut full_control_peers: Vec<String> = Vec::new();
+        let mut push_fc_peer = |name: String| {
+            if !full_control_peers
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&name))
+            {
+                full_control_peers.push(name);
+            }
+        };
+
+        let peers: Vec<PeerStatus> = cfg
             .peers
             .iter()
             .map(|p| {
                 let st = peer_states.get(&p.name).cloned().unwrap_or_default();
+                let inbound_remote_fc = conn_snapshot.iter().any(|(cname, rfc)| {
+                    *rfc && (cname.eq_ignore_ascii_case(&p.name)
+                        || st
+                            .display_name
+                            .as_deref()
+                            .is_some_and(|dn| dn.eq_ignore_ascii_case(cname)))
+                });
+                let remote_full_control = if st.online {
+                    st.remote_full_control
+                } else {
+                    inbound_remote_fc
+                };
+                let full_control_active =
+                    (st.online || inbound_remote_fc)
+                        && is_mutual_full_control(p.full_control, remote_full_control);
+                if full_control_active {
+                    push_fc_peer(p.name.clone());
+                }
                 PeerStatus {
                     name: p.name.clone(),
                     host: p.host.clone(),
@@ -2032,6 +2846,9 @@ impl TeamApi for TeamHub {
                     display_name: st.display_name,
                     last_error: st.last_error,
                     sessions: st.sessions,
+                    local_full_control: p.full_control,
+                    remote_full_control,
+                    full_control_active,
                 }
             })
             .collect();
@@ -2074,13 +2891,7 @@ impl TeamApi for TeamHub {
             }
         };
 
-        let watchers = self
-            .connections
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .filter_map(|c| c.peer_name.clone())
-            .collect();
+        let watchers: Vec<String> = conn_snapshot.into_iter().map(|(n, _)| n).collect();
 
         TeamSnapshot {
             enabled: cfg.enabled,
@@ -2091,6 +2902,7 @@ impl TeamApi for TeamHub {
             peers,
             local_sessions,
             watchers,
+            full_control_peers,
         }
     }
 
@@ -2418,5 +3230,88 @@ mod render_tests {
         assert!(text.contains("RECIBIDO-VELOX"), "reply missing:\n{text}");
         assert!(text.contains("Prueba de Velox Online."), "prompt missing:\n{text}");
         assert!(!text.contains("\n\n\n"), "blank runs not collapsed:\n{text}");
+    }
+
+    #[test]
+    fn mutual_full_control_truth_table_all_four_combinations() {
+        assert!(!is_mutual_full_control(false, false));
+        assert!(!is_mutual_full_control(true, false));
+        assert!(!is_mutual_full_control(false, true));
+        assert!(is_mutual_full_control(true, true));
+    }
+
+    #[tokio::test]
+    async fn mutual_full_control_hot_toggle_all_four_states_and_instant_cutoff() {
+        let mut cfg = TeamConfig {
+            enabled: true,
+            display_name: "Rodolfo".to_string(),
+            listen_port: 0,
+            bind_host: "127.0.0.1".to_string(),
+            token: "tok".to_string(),
+            auto_approve_local: false,
+            peers: vec![PeerConfig {
+                name: "Benjamin".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: 43220,
+                full_control: false,
+            }],
+        };
+
+        let hub = TeamHub::new_with_backends(
+            Arc::new(FixtureSessions(Vec::new())),
+            None,
+            cfg.clone(),
+        );
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(32);
+        let conn_id = hub.register_connection(tx);
+
+        // (local=false, remote=false) -> inactive
+        hub.handle_client_hello(conn_id, "Benjamin".to_string(), false);
+        assert!(!hub.is_conn_mutual_full_control(conn_id));
+        assert_eq!(rx.try_recv().ok(), Some(ServerMsg::FullControl { enabled: false }));
+        assert!(hub.snapshot().full_control_peers.is_empty());
+
+        // (local=false, remote=true) -> still inactive
+        hub.handle_client_full_control(conn_id, true);
+        assert!(!hub.is_conn_mutual_full_control(conn_id));
+        let snap = hub.snapshot();
+        assert!(snap.full_control_peers.is_empty());
+        assert!(!snap.peers[0].local_full_control);
+        assert!(snap.peers[0].remote_full_control);
+        assert!(!snap.peers[0].full_control_active);
+
+        // Hot-toggle local ON -> (local=true, remote=true) -> ACTIVE immediately & notified
+        cfg.peers[0].full_control = true;
+        hub.apply_config(cfg.clone()).await;
+        assert!(hub.is_conn_mutual_full_control(conn_id));
+        assert_eq!(rx.try_recv().ok(), Some(ServerMsg::FullControl { enabled: true }));
+        let snap = hub.snapshot();
+        assert_eq!(snap.full_control_peers, vec!["Benjamin".to_string()]);
+        assert!(snap.peers[0].full_control_active);
+
+        // Drain any Sessions update sent on activation
+        while rx.try_recv().is_ok() {}
+
+        // Hot-toggle remote OFF -> (local=true, remote=false) -> INACTIVE immediately
+        hub.handle_client_full_control(conn_id, false);
+        assert!(!hub.is_conn_mutual_full_control(conn_id));
+        let snap = hub.snapshot();
+        assert!(snap.full_control_peers.is_empty());
+        assert!(snap.peers[0].local_full_control);
+        assert!(!snap.peers[0].remote_full_control);
+        assert!(!snap.peers[0].full_control_active);
+
+        // Re-enable remote ON -> ACTIVE again, then hot-toggle local OFF -> INACTIVE immediately
+        hub.handle_client_full_control(conn_id, true);
+        assert!(hub.is_conn_mutual_full_control(conn_id));
+        while rx.try_recv().is_ok() {}
+
+        cfg.peers[0].full_control = false;
+        hub.apply_config(cfg).await;
+        assert!(!hub.is_conn_mutual_full_control(conn_id));
+        assert_eq!(rx.try_recv().ok(), Some(ServerMsg::FullControl { enabled: false }));
+        assert!(hub.snapshot().full_control_peers.is_empty());
+
+        hub.unregister_connection(conn_id);
     }
 }

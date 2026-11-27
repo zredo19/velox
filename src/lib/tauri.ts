@@ -485,6 +485,7 @@ function createDevMockApi() {
       peers: [],
       localSessions: [],
       watchers: [],
+      fullControlPeers: [],
     }),
     setSessionShared: async (sessionId: string, shared: boolean) => {
       sessions = sessions.map((s) => (s.id === sessionId ? { ...s, shared } : s));
@@ -492,6 +493,19 @@ function createDevMockApi() {
     },
     teamSubscribe: async () => {},
     teamUnsubscribe: async () => {},
+    sendTeamInput: async () => {},
+    setPeerFullControl: async (peer: string, enabled: boolean) => {
+      config = {
+        ...config,
+        team: {
+          ...config.team,
+          peers: config.team.peers.map((p) =>
+            p.name.toLowerCase() === peer.toLowerCase() ? { ...p, fullControl: enabled } : p,
+          ),
+        },
+      };
+      return { ...config };
+    },
     sendTeamTask: async (peer: string | null, sessionId: string, text: string): Promise<TaskTicket> => ({
       requestId: `mock-${Date.now()}`,
       direction: "outgoing",
@@ -616,6 +630,12 @@ const tauriApi = {
     invoke<void>("team_subscribe", { peer, sessionId }),
   teamUnsubscribe: (peer: string, sessionId: string) =>
     invoke<void>("team_unsubscribe", { peer, sessionId }),
+  /** Raw keyboard input to a teammate's shared session (only accepted under mutual Control total). */
+  sendTeamInput: (peer: string, sessionId: string, data: string) =>
+    invoke<void>("team_send_input", { peer, sessionId, data }),
+  /** Hot-toggle mutual "Control total" for a configured peer without disconnecting. */
+  setPeerFullControl: (peer: string, enabled: boolean) =>
+    invoke<VeloxConfig>("set_peer_full_control", { peer, enabled }),
   /** `peer` null = a session on this machine. */
   sendTeamTask: (peer: string | null, sessionId: string, text: string) =>
     invoke<TaskTicket>("send_team_task", { peer, sessionId, text }),

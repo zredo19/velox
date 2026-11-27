@@ -355,9 +355,11 @@ async fn test_2_right_token_sends_hello_and_only_shared_sessions() {
         ServerMsg::Hello {
             protocol,
             peer_name,
+            full_control,
         } => {
             assert_eq!(protocol, PROTOCOL_VERSION);
             assert_eq!(peer_name, "Rodolfo");
+            assert!(!full_control);
         }
         other => panic!("expected Hello, got {other:?}"),
     }
@@ -473,9 +475,14 @@ async fn test_4_task_request_pending_accept_delivers_bytes_and_updates() {
     let hello_cli = serde_json::to_string(&ClientMsg::Hello {
         protocol: PROTOCOL_VERSION,
         peer_name: "Benjamin".to_string(),
+        full_control: false,
     })
     .unwrap();
     ws.send(Message::text(hello_cli)).await.unwrap();
+    assert_eq!(
+        recv_server_msg(&mut ws).await,
+        ServerMsg::FullControl { enabled: false }
+    );
 
     let req_msg = serde_json::to_string(&ClientMsg::TaskRequest {
         request_id: "req-42".to_string(),
@@ -631,6 +638,7 @@ async fn test_6_client_reconnects_after_server_restart_and_resubscribes() {
         name: "Benjamin".to_string(),
         host: "127.0.0.1".to_string(),
         port,
+        full_control: false,
     }];
     let cli_hub = TeamHub::new_with_backends(cli_sessions, Some(cli_sink.clone()), cli_cfg);
     cli_hub.start_headless();
@@ -1103,4 +1111,371 @@ async fn local_messaging_queues_when_blocked_and_delivers_into_busy_agy() {
     assert!(String::from_utf8_lossy(&sessions.written_bytes("agy-1111")).contains("Queued turn"));
 
     hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn full_control_two_hubs_mutual_task_and_remote_input_and_hot_cutoff() {
+    // Allocate two free localhost ports so Hub A (Rodolfo) and Hub B (Benjamin) can connect bidirectionally.
+    let p_a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port_a = p_a.local_addr().unwrap().port();
+    drop(p_a);
+    let p_b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port_b = p_b.local_addr().unwrap().port();
+    drop(p_b);
+
+    let sessions_a = Arc::new(FakeLocalSessions::new(vec![
+        make_session("s-live", "velox 1", true, SessionStatus::Idle),
+        make_session("s-priv", "Privada", false, SessionStatus::Idle),
+        make_session("s-sleep", "Dormida", true, SessionStatus::Sleeping),
+    ]));
+    let sink_a = Arc::new(FakeEventSink::new());
+    let mut cfg_a = server_config("Rodolfo", "mutual-secret", port_a);
+    cfg_a.peers = vec![PeerConfig {
+        name: "Benjamin".to_string(),
+        host: "127.0.0.1".to_string(),
+        port: port_b,
+        full_control: false,
+    }];
+    let hub_a = TeamHub::new_with_backends(
+        Arc::clone(&sessions_a) as Arc<dyn LocalSessions>,
+        Some(Arc::clone(&sink_a) as Arc<dyn EventSink>),
+        cfg_a.clone(),
+    );
+
+    let sessions_b = Arc::new(FakeLocalSessions::new(vec![]));
+    let sink_b = Arc::new(FakeEventSink::new());
+    let mut cfg_b = server_config("Benjamin", "mutual-secret", port_b);
+    cfg_b.peers = vec![PeerConfig {
+        name: "Rodolfo".to_string(),
+        host: "127.0.0.1".to_string(),
+        port: port_a,
+        full_control: false,
+    }];
+    let hub_b = TeamHub::new_with_backends(
+        Arc::clone(&sessions_b) as Arc<dyn LocalSessions>,
+        Some(Arc::clone(&sink_b) as Arc<dyn EventSink>),
+        cfg_b.clone(),
+    );
+
+    hub_a.start_headless();
+    hub_b.start_headless();
+    let addr_a = wait_for_server_addr(&hub_a).await;
+    let _addr_b = wait_for_server_addr(&hub_b).await;
+
+    // Wait for both hubs to connect online
+    let mut both_online = false;
+    for _ in 0..100 {
+        let sa = hub_a.snapshot();
+        let sb = hub_b.snapshot();
+        if sa.peers[0].online && sb.peers[0].online && sb.peers[0].sessions.len() == 1 {
+            both_online = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(both_online, "both hubs must connect online");
+
+    // 1. Both OFF: remote input rejected on client AND rejected on raw WS server; task stays Pending.
+    assert!(hub_b
+        .send_remote_input("Rodolfo", "s-live", "\x03")
+        .await
+        .is_err());
+
+    let mut raw_ws = ws_connect(addr_a, Some("mutual-secret")).await.unwrap();
+    let _ = recv_server_msg(&mut raw_ws).await; // Hello
+    let _ = recv_server_msg(&mut raw_ws).await; // Sessions
+    ws_send_json(
+        &mut raw_ws,
+        &ClientMsg::Hello {
+            protocol: PROTOCOL_VERSION,
+            peer_name: "Benjamin".to_string(),
+            full_control: true, // Spoofing remote=true while A still has local=false!
+        },
+    )
+    .await;
+    assert_eq!(
+        recv_server_msg(&mut raw_ws).await,
+        ServerMsg::FullControl { enabled: false }
+    );
+    ws_send_json(
+        &mut raw_ws,
+        &ClientMsg::TerminalInput {
+            session_id: "s-live".to_string(),
+            data_b64: BASE64.encode(b"\x03"),
+        },
+    )
+    .await;
+    match recv_server_msg(&mut raw_ws).await {
+        ServerMsg::Error { message } => {
+            assert!(message.to_lowercase().contains("control total"));
+        }
+        other => panic!("expected Error rejecting unauthorized TerminalInput, got {other:?}"),
+    }
+    assert!(
+        sessions_a.written_bytes("s-live").is_empty(),
+        "unauthorized TerminalInput must never write to PTY"
+    );
+
+    // 2. Only B enables full_control (A stays OFF): still NOT active, task stays Pending.
+    cfg_b.peers[0].full_control = true;
+    hub_b.apply_config(cfg_b.clone()).await;
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(!hub_b.snapshot().peers[0].full_control_active);
+    assert!(hub_a.snapshot().full_control_peers.is_empty());
+    assert!(hub_b
+        .send_remote_input("Rodolfo", "s-live", "hello\r")
+        .await
+        .is_err());
+
+    let pending_ticket = hub_b
+        .send_task(SendTaskRequest {
+            peer: Some("Rodolfo".to_string()),
+            session_id: "s-live".to_string(),
+            text: "needs approval".to_string(),
+            from_session: None,
+        })
+        .await
+        .expect("send pending task");
+    let mut saw_pending = false;
+    for _ in 0..50 {
+        if let Some(t) = hub_a.task_status(&pending_ticket.request_id) {
+            assert_eq!(t.state, TaskState::Pending);
+            saw_pending = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(saw_pending, "one-sided full_control must still keep task Pending");
+    assert!(sessions_a.written_bytes("s-live").is_empty());
+
+    // 3. A ALSO enables full_control -> MUTUAL ACTIVE (hot, without dropping connections!).
+    cfg_a.peers[0].full_control = true;
+    hub_a.apply_config(cfg_a.clone()).await;
+
+    let mut mutual_active = false;
+    for _ in 0..100 {
+        let sa = hub_a.snapshot();
+        let sb = hub_b.snapshot();
+        if sa.peers[0].full_control_active
+            && sb.peers[0].full_control_active
+            && sa.full_control_peers == vec!["Benjamin".to_string()]
+            && sb.full_control_peers == vec!["Rodolfo".to_string()]
+            && sb.peers[0].sessions.len() == 2 // s-live + s-sleep (s-priv still hidden!)
+        {
+            mutual_active = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(
+        mutual_active,
+        "mutual full_control must activate on both hubs; A={:?}, B={:?}",
+        hub_a.snapshot(),
+        hub_b.snapshot()
+    );
+    assert!(
+        !hub_b.snapshot().peers[0]
+            .sessions
+            .iter()
+            .any(|s| s.id == "s-priv"),
+        "unshared session must stay invisible even under Control total"
+    );
+
+    // 3a. Task delivers automatically WITHOUT Accept/Reject card, stays in history, emits toast.
+    let auto_ticket = hub_b
+        .send_task(SendTaskRequest {
+            peer: Some("Rodolfo".to_string()),
+            session_id: "s-live".to_string(),
+            text: "run cargo test".to_string(),
+            from_session: Some("Ben Tab".to_string()),
+        })
+        .await
+        .expect("send auto-approved task");
+
+    let mut delivered_on_both = false;
+    for _ in 0..100 {
+        let ta = hub_a.task_status(&auto_ticket.request_id);
+        let tb = hub_b.task_status(&auto_ticket.request_id);
+        if ta.as_ref().is_some_and(|t| t.state == TaskState::Delivered)
+            && tb.as_ref().is_some_and(|t| t.state == TaskState::Delivered)
+        {
+            delivered_on_both = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(delivered_on_both, "task must auto-deliver on both hubs");
+
+    let expected_task_bytes: Vec<u8> = build_task_input(AgentKind::Claude, "run cargo test")
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(sessions_a.written_bytes("s-live"), expected_task_bytes);
+
+    let toast_ev = sink_a
+        .wait_for(Duration::from_secs(2), |evt, val| {
+            evt == EVT_TEAM_LOCAL_MESSAGE
+                && val["isRemote"] == true
+                && val["status"] == "delivered"
+                && val["fromTitle"] == "Benjamin"
+                && val["toTitle"] == "velox 1"
+        })
+        .await
+        .expect("remote auto-delivery toast event on Hub A");
+    assert_eq!(toast_ev["preview"], "run cargo test");
+
+    // 3b. Direct raw keyboard input (Ctrl+C + Arrow Up + 'y' + Enter) arrives UNFILTERED in shared session!
+    let raw_keys = "\x03\x1b[Ay\r";
+    hub_b
+        .send_remote_input("Rodolfo", "s-live", raw_keys)
+        .await
+        .expect("send remote raw input");
+    let mut got_raw = false;
+    for _ in 0..80 {
+        if sessions_a
+            .written_bytes("s-live")
+            .ends_with(raw_keys.as_bytes())
+        {
+            got_raw = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(got_raw, "raw control keys must reach owner's shared PTY verbatim");
+
+    // 3c. Unshared session stays completely inaccessible even with mutual full control ON!
+    hub_b
+        .send_remote_input("Rodolfo", "s-priv", "secret\r")
+        .await
+        .expect("frame dispatched to server");
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert!(
+        sessions_a.written_bytes("s-priv").is_empty(),
+        "unshared session must NEVER receive remote input"
+    );
+
+    // 3d. Sleeping shared session wakes automatically when tasked under mutual full control!
+    let sessions_a_bg = Arc::clone(&sessions_a);
+    let hub_a_bg = Arc::clone(&hub_a);
+    tokio::spawn(async move {
+        for _ in 0..100 {
+            if sessions_a_bg
+                .woken
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|id| id == "s-sleep")
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                sessions_a_bg.set_status("s-sleep", SessionStatus::Idle);
+                sessions_a_bg.push_output(
+                    &hub_a_bg,
+                    "s-sleep",
+                    "────────────\n❯ \n────────────\n".as_bytes(),
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    });
+
+    let wake_ticket = hub_b
+        .send_task(SendTaskRequest {
+            peer: Some("Rodolfo".to_string()),
+            session_id: "s-sleep".to_string(),
+            text: "despierta y revisa".to_string(),
+            from_session: None,
+        })
+        .await
+        .expect("send task to sleeping shared session");
+
+    let mut wake_delivered = false;
+    for _ in 0..150 {
+        if hub_b
+            .task_status(&wake_ticket.request_id)
+            .is_some_and(|t| t.state == TaskState::Delivered)
+        {
+            wake_delivered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert!(wake_delivered, "sleeping shared session must wake and receive task");
+    assert!(sessions_a.woken.lock().unwrap().contains(&"s-sleep".to_string()));
+    assert!(String::from_utf8_lossy(&sessions_a.written_bytes("s-sleep"))
+        .contains("despierta y revisa"));
+
+    // 4. Hot cutoff: A turns OFF full_control -> immediately stops control on both sides!
+    let bytes_before_cutoff = sessions_a.written_bytes("s-live").len();
+    cfg_a.peers[0].full_control = false;
+    hub_a.apply_config(cfg_a).await;
+
+    let mut cut_off = false;
+    for _ in 0..100 {
+        let sa = hub_a.snapshot();
+        let sb = hub_b.snapshot();
+        if !sa.peers[0].full_control_active
+            && !sb.peers[0].full_control_active
+            && sa.full_control_peers.is_empty()
+            && sb.full_control_peers.is_empty()
+        {
+            cut_off = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(cut_off, "turning off full_control must cut off immediately on both hubs");
+
+    assert!(hub_b
+        .send_remote_input("Rodolfo", "s-live", "after-off\r")
+        .await
+        .is_err());
+
+    // Even a raw WS frame on the already-open raw_ws connection is rejected on the server.
+    ws_send_json(
+        &mut raw_ws,
+        &ClientMsg::TerminalInput {
+            session_id: "s-live".to_string(),
+            data_b64: BASE64.encode(b"rogue\r"),
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(
+        sessions_a.written_bytes("s-live").len(),
+        bytes_before_cutoff,
+        "no bytes may be written after full_control cutoff"
+    );
+
+    // Subsequent task goes back to Pending (manual approval).
+    let after_off_ticket = hub_b
+        .send_task(SendTaskRequest {
+            peer: Some("Rodolfo".to_string()),
+            session_id: "s-live".to_string(),
+            text: "needs approval again".to_string(),
+            from_session: None,
+        })
+        .await
+        .expect("send task after cutoff");
+    let mut back_to_pending = false;
+    for _ in 0..50 {
+        if let Some(t) = hub_a.task_status(&after_off_ticket.request_id) {
+            assert_eq!(t.state, TaskState::Pending);
+            back_to_pending = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(back_to_pending, "after cutoff, tasks must require manual approval again");
+
+    hub_b.shutdown().await;
+    hub_a.shutdown().await;
+}
+
+async fn ws_send_json(
+    ws: &mut (impl SinkExt<Message, Error = WsError> + Unpin),
+    msg: &ClientMsg,
+) {
+    let raw = serde_json::to_string(msg).unwrap();
+    ws.send(Message::text(raw)).await.unwrap();
 }

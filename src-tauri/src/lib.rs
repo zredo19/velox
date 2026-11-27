@@ -88,6 +88,8 @@ pub fn run() {
             commands::team::get_team_status,
             commands::team::team_subscribe,
             commands::team::team_unsubscribe,
+            commands::team::team_send_input,
+            commands::team::set_peer_full_control,
             commands::team::send_team_task,
             commands::team::list_team_tasks,
             commands::team::respond_team_task,

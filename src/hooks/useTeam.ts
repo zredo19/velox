@@ -68,12 +68,18 @@ function upsertLocalMessage(
   return [incoming, ...list].slice(0, MAX_LOCAL_MESSAGES);
 }
 
-export function useTeam(): UseTeamResult {
+export interface UseTeamOptions {
+  onRemoteAutoMessage?: (ev: LocalMessageEvent) => void;
+}
+
+export function useTeam(options?: UseTeamOptions): UseTeamResult {
   const [team, setTeam] = useState<TeamSnapshot | null>(null);
   const [tasks, setTasks] = useState<TaskTicket[]>([]);
   const [localMessages, setLocalMessages] = useState<LocalMessageEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const messageTimersRef = useRef<Map<string, number>>(new Map());
+  const onRemoteAutoMessageRef = useRef(options?.onRemoteAutoMessage);
+  onRemoteAutoMessageRef.current = options?.onRemoteAutoMessage;
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -151,6 +157,9 @@ export function useTeam(): UseTeamResult {
         const uLocal = await veloxApi.onTeamLocalMessage((ev) => {
           if (!mounted) return;
           setLocalMessages((prev) => upsertLocalMessage(prev, ev));
+          if (ev.isRemote) {
+            onRemoteAutoMessageRef.current?.(ev);
+          }
           const prevTimer = timers.get(ev.id);
           if (prevTimer !== undefined) {
             window.clearTimeout(prevTimer);

@@ -10,6 +10,7 @@ import {
   Plus,
   Search,
   Settings,
+  ShieldAlert,
   Square,
   Users,
   X,
@@ -141,6 +142,13 @@ export const TitleBar = memo(function TitleBar({
   const activeMcps = mcp?.activeBackends ?? 0;
   const totalMcps = mcp?.totalBackends ?? 0;
   const cwdBasename = activeSession ? getPathBasename(activeSession.cwd) : "";
+  const fullControlPeers = team?.fullControlPeers ?? [];
+  const fullControlLabel =
+    fullControlPeers.length === 1
+      ? `${fullControlPeers[0]} tiene control total`
+      : fullControlPeers.length > 1
+        ? `${fullControlPeers.join(", ")} tienen control total`
+        : null;
 
   return (
     <header className="h-10 shrink-0 bg-[var(--velox-surface)] border-b border-white/[0.07] select-none flex items-center justify-between pl-2.5 pr-0 velox-chrome-transition">
@@ -254,6 +262,20 @@ export const TitleBar = memo(function TitleBar({
       {/* Right telemetry pills & native Windows window controls */}
       <div className="flex items-center h-full">
         <div className="flex items-center gap-1.5 pr-2">
+          {fullControlLabel && (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              title={`${fullControlLabel} — clic para abrir Ajustes → Team y desactivar`}
+              aria-label={fullControlLabel}
+              className="h-6 px-2 flex items-center gap-1.5 rounded-md bg-amber-500/18 hover:bg-amber-500/28 border border-amber-400/45 text-[11.5px] font-medium text-amber-200 transition-colors cursor-pointer shrink-0"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+              <ShieldAlert className="w-3 h-3 text-amber-300 shrink-0" />
+              <span className="max-w-[220px] truncate">{fullControlLabel}</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={onToggleMcpDrawer}

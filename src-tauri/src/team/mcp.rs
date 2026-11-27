@@ -303,9 +303,19 @@ impl TeamMcp {
             from_session,
         };
 
+        let full_control_active = resolved.peer_name.as_deref().is_some_and(|pname| {
+            snap.peers
+                .iter()
+                .any(|p| p.name == pname && p.full_control_active)
+        });
+
         match self.api.send_task(req).await {
             Ok(ticket) => {
                 let status_line = match ticket.state {
+                    TaskState::Pending if full_control_active => format!(
+                        "Task sent (request_id: {}, state: pending). Mutual Control total is active with {} so it delivers automatically without manual approval. Poll team_task_status with this request_id to confirm delivery.",
+                        ticket.request_id, resolved.human_name
+                    ),
                     TaskState::Pending => format!(
                         "Task queued (request_id: {}, state: pending). Waiting for {} to accept in Velox. Poll team_task_status with this request_id to check progress.",
                         ticket.request_id, resolved.human_name
@@ -701,7 +711,15 @@ fn format_team_snapshot(snap: &TeamSnapshot) -> String {
         let _ = writeln!(out, "  (none)");
     } else {
         for peer in &snap.peers {
-            let state = if peer.online { "online" } else { "offline" };
+            let state = if peer.online {
+                if peer.full_control_active {
+                    "online · full control"
+                } else {
+                    "online"
+                }
+            } else {
+                "offline"
+            };
             let display = peer
                 .display_name
                 .as_deref()
@@ -970,6 +988,9 @@ mod tests {
                             display_name: Some("Benjamin".into()),
                             last_error: None,
                             sessions: vec![ben_a, ben_b],
+                            local_full_control: false,
+                            remote_full_control: false,
+                            full_control_active: false,
                         },
                         PeerStatus {
                             name: "OfflinePeer".into(),
@@ -979,6 +1000,9 @@ mod tests {
                             display_name: None,
                             last_error: Some("connection refused".into()),
                             sessions: vec![],
+                            local_full_control: false,
+                            remote_full_control: false,
+                            full_control_active: false,
                         },
                     ],
                     local_sessions: vec![
@@ -992,6 +1016,7 @@ mod tests {
                         },
                     ],
                     watchers: vec!["Benjamin".into()],
+                    full_control_peers: vec![],
                 },
                 tickets: Mutex::new(tickets),
                 sent_requests: Mutex::new(Vec::new()),

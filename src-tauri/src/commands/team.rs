@@ -1,6 +1,7 @@
 //! Tauri IPC commands for Velox Online (team sharing, mirrors, and task requests).
 
-use crate::domain::error::VeloxResult;
+use crate::domain::config::VeloxConfig;
+use crate::domain::error::{VeloxError, VeloxResult};
 use crate::team::api::{SendTaskRequest, TaskTicket, TeamApi, TeamSnapshot};
 use crate::AppState;
 use tauri::State;
@@ -27,6 +28,36 @@ pub async fn team_unsubscribe(
     session_id: String,
 ) -> VeloxResult<()> {
     state.team.unsubscribe(&peer, &session_id).await
+}
+
+#[tauri::command]
+pub async fn team_send_input(
+    state: State<'_, AppState>,
+    peer: String,
+    session_id: String,
+    data: String,
+) -> VeloxResult<()> {
+    state.team.send_remote_input(&peer, &session_id, &data).await
+}
+
+#[tauri::command]
+pub async fn set_peer_full_control(
+    state: State<'_, AppState>,
+    peer: String,
+    enabled: bool,
+) -> VeloxResult<VeloxConfig> {
+    let mut cfg = state.sessions.get_config();
+    let target = cfg
+        .team
+        .peers
+        .iter_mut()
+        .find(|p| p.name.eq_ignore_ascii_case(peer.trim()))
+        .ok_or_else(|| VeloxError::InvalidInput(format!("Unknown peer: {peer}")))?;
+    target.full_control = enabled;
+    let team_cfg = cfg.team.clone();
+    let updated = state.sessions.update_config(cfg)?;
+    state.team.apply_config(team_cfg).await;
+    Ok(updated)
 }
 
 #[tauri::command]

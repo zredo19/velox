@@ -306,6 +306,11 @@ export function useSessions() {
     }
   }, []);
 
+  const applyLoadedConfig = useCallback((saved: VeloxConfig) => {
+    setConfig(saved);
+    setRecentDirs(saved.recentDirs);
+  }, []);
+
   const clearError = useCallback(() => {
     setError(null);
   }, []);
@@ -332,5 +337,6 @@ export function useSessions() {
     renameSession,
     reorderSessions,
     updateConfig,
+    applyLoadedConfig,
   };
 }

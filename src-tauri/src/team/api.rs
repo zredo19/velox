@@ -24,6 +24,15 @@ pub struct PeerStatus {
     pub last_error: Option<String>,
     /// That peer's shared sessions (empty while offline).
     pub sessions: Vec<RemoteSessionInfo>,
+    /// Whether THIS machine enabled "Control total" for this peer.
+    #[serde(default)]
+    pub local_full_control: bool,
+    /// Whether THAT peer announced "Control total" enabled for us.
+    #[serde(default)]
+    pub remote_full_control: bool,
+    /// Active ONLY when both sides have enabled "Control total" for each other while connected.
+    #[serde(default)]
+    pub full_control_active: bool,
 }
 
 /// One session on THIS machine, as listed to local agents and the UI.
@@ -51,6 +60,9 @@ pub struct TeamSnapshot {
     pub local_sessions: Vec<LocalSessionInfo>,
     /// Display names of teammates currently connected to this machine's server.
     pub watchers: Vec<String>,
+    /// Display/config names of teammates with mutual "Control total" currently active.
+    #[serde(default)]
+    pub full_control_peers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +147,9 @@ pub struct LocalMessageEvent {
     pub woke_up: bool,
     pub preview: String,
     pub timestamp: String,
+    /// True when this delivery came from a remote teammate under mutual "Control total".
+    #[serde(default)]
+    pub is_remote: bool,
 }
 
 /// Request parameters for direct local inter-session messaging (no human inbox approval).

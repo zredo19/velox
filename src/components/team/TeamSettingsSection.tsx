@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Copy, Eye, EyeOff, KeyRound, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, Eye, EyeOff, KeyRound, Plus, ShieldAlert, Trash2 } from "lucide-react";
 import { veloxApi } from "../../lib/tauri";
-import type { PeerConfig, TeamConfig, TeamSnapshot } from "../../types/ipc";
+import type { PeerConfig, PeerStatus, TeamConfig, TeamSnapshot } from "../../types/ipc";
 
 export const DEFAULT_TEAM_CONFIG: TeamConfig = {
   enabled: false,
@@ -74,6 +74,9 @@ export interface TeamSettingsSectionProps {
   value: TeamConfig;
   teamStatus: TeamSnapshot | null;
   validation: TeamValidationResult;
+  /** Names of peers already persisted in config.toml so Control total can toggle live immediately. */
+  savedPeerNames?: string[];
+  onTogglePeerFullControl?: (peerName: string, enabled: boolean) => Promise<void>;
   onChange: (next: TeamConfig) => void;
 }
 
@@ -81,12 +84,15 @@ export function TeamSettingsSection({
   value,
   teamStatus,
   validation,
+  savedPeerNames = [],
+  onTogglePeerFullControl,
   onChange,
 }: TeamSettingsSectionProps) {
   const [showToken, setShowToken] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [copied, setCopied] = useState(false);
   const [tokenError, setTokenError] = useState<string | null>(null);
+  const [togglingPeer, setTogglingPeer] = useState<string | null>(null);
   const copyTimerRef = useRef<number | undefined>(undefined);
 
   useEffect(() => () => window.clearTimeout(copyTimerRef.current), []);
@@ -130,8 +136,34 @@ export function TeamSettingsSection({
   const addPeer = () => {
     onChange({
       ...value,
-      peers: [...value.peers, { name: "", host: "", port: 43120 }],
+      peers: [...value.peers, { name: "", host: "", port: 43120, fullControl: false }],
     });
+  };
+
+  const handleToggleFullControl = async (index: number, peer: PeerConfig, nextEnabled: boolean) => {
+    updatePeer(index, { fullControl: nextEnabled });
+    const trimmed = peer.name.trim();
+    const isSaved =
+      trimmed.length > 0 &&
+      savedPeerNames.some((n) => n.toLowerCase() === trimmed.toLowerCase());
+    if (isSaved && onTogglePeerFullControl) {
+      setTogglingPeer(trimmed.toLowerCase());
+      try {
+        await onTogglePeerFullControl(trimmed, nextEnabled);
+      } finally {
+        setTogglingPeer(null);
+      }
+    }
+  };
+
+  const findPeerStatus = (peerName: string): PeerStatus | null => {
+    const trimmed = peerName.trim();
+    if (!trimmed || !teamStatus) return null;
+    return (
+      teamStatus.peers.find(
+        (p) => p.name.toLowerCase() === trimmed.toLowerCase(),
+      ) ?? null
+    );
   };
 
   const removePeer = (index: number) => {
@@ -342,8 +374,35 @@ export function TeamSettingsSection({
           <div className="space-y-2">
             {value.peers.map((peer, index) => {
               const rowError = validation.peerErrors[index];
+              const peerStatus = findPeerStatus(peer.name);
+              const peerLabel = peerStatus?.displayName || peer.name.trim() || "el compañero";
+              const localOn = Boolean(peer.fullControl);
+              const remoteOn = Boolean(peerStatus?.remoteFullControl);
+              const mutualActive = Boolean(peerStatus?.fullControlActive && localOn);
+              const isBusy =
+                togglingPeer !== null &&
+                togglingPeer === peer.name.trim().toLowerCase();
+
+              let fcStatusLabel = "Apagado";
+              let fcStatusClass = "text-[#7E889E]";
+              if (mutualActive) {
+                fcStatusLabel = "Activo";
+                fcStatusClass =
+                  "px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 font-medium";
+              } else if (localOn) {
+                fcStatusLabel = `Esperando a que ${peerLabel} lo active`;
+                fcStatusClass =
+                  "px-1.5 py-0.5 rounded bg-amber-500/12 border border-amber-500/30 text-amber-300";
+              } else if (remoteOn) {
+                fcStatusLabel = `${peerLabel} lo activó · actívalo aquí para conectar`;
+                fcStatusClass = "text-sky-300";
+              }
+
               return (
-                <div key={index} className="space-y-1">
+                <div
+                  key={index}
+                  className="p-2.5 rounded-lg bg-[#11141C] border border-white/[0.06] space-y-2"
+                >
                   <div className="flex items-center gap-1.5">
                     <input
                       type="text"
@@ -389,6 +448,50 @@ export function TeamSettingsSection({
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
+
+                  {/* Mutual "Control total" toggle per peer */}
+                  <div className="flex items-center justify-between gap-3 pt-1.5 border-t border-white/[0.05]">
+                    <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                      <span className="inline-flex items-center gap-1.5 text-[11.5px] font-medium text-[#E6EAF2]">
+                        <ShieldAlert
+                          className={`w-3.5 h-3.5 shrink-0 ${
+                            mutualActive
+                              ? "text-emerald-400"
+                              : localOn
+                                ? "text-amber-300"
+                                : "text-[#7E889E]"
+                          }`}
+                        />
+                        <span>Control total</span>
+                      </span>
+                      <span className={`text-[11px] truncate ${fcStatusClass}`}>
+                        {fcStatusLabel}
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={localOn}
+                      aria-label={`Control total para ${peerLabel}`}
+                      disabled={isBusy}
+                      onClick={() => void handleToggleFullControl(index, peer, !localOn)}
+                      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors cursor-pointer disabled:opacity-50 ${
+                        localOn
+                          ? mutualActive
+                            ? "bg-emerald-500 border-emerald-400"
+                            : "bg-amber-500 border-amber-400"
+                          : "bg-[#1C2130] border-white/[0.12]"
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${
+                          localOn ? "translate-x-[18px]" : "translate-x-[2px]"
+                        }`}
+                      />
+                    </button>
+                  </div>
+
                   {rowError && (
                     <div className="text-[11px] text-rose-300 pl-1">
                       {rowError}

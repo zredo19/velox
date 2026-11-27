@@ -24,6 +24,8 @@ pub const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
 pub const MAX_READ_LINES: u32 = 400;
 /// Upper bound for a task text, in bytes.
 pub const MAX_TASK_TEXT_BYTES: usize = 16 * 1024;
+/// Upper bound for a single raw remote terminal input frame (decoded bytes).
+pub const MAX_TERMINAL_INPUT_BYTES: usize = 16 * 1024;
 
 /// A shared session as a teammate sees it. Never includes the full cwd path, env or pid.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,7 +72,12 @@ pub enum ServerMsg {
         protocol: u32,
         /// `team.displayName` of the server machine.
         peer_name: String,
+        /// Whether the server has enabled mutual full control for this peer (also updated via `FullControl`).
+        #[serde(default)]
+        full_control: bool,
     },
+    /// Announces the server's current full-control toggle for this connected peer (after handshake and on live toggle).
+    FullControl { enabled: bool },
     /// Full list of shared sessions. Sent after `Hello` and again (debounced ~500 ms) on change.
     Sessions { sessions: Vec<RemoteSessionInfo> },
     /// Reply to `Subscribe`: scrollback tail + the stream position it covers.
@@ -120,10 +127,20 @@ pub enum ClientMsg {
         protocol: u32,
         /// `team.displayName` of the client machine.
         peer_name: String,
+        /// Whether this client has enabled mutual full control for the server peer.
+        #[serde(default)]
+        full_control: bool,
     },
+    /// Announces a live change to this client's full-control toggle for the server peer.
+    FullControl { enabled: bool },
     /// Start mirroring a shared session (server answers with `Snapshot`, then `Output`s).
     Subscribe { session_id: String },
     Unsubscribe { session_id: String },
+    /// Raw keyboard/terminal bytes sent to a shared session (ONLY accepted when mutual full control is active).
+    TerminalInput {
+        session_id: String,
+        data_b64: String,
+    },
     /// Ask the server machine's human to type `text` into one of its shared sessions.
     TaskRequest {
         request_id: String,
@@ -177,5 +194,35 @@ mod tests {
         assert_eq!(json["fromSession"], "Velox Lider");
         let back: ClientMsg = serde_json::from_value(json).unwrap();
         assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn full_control_and_terminal_input_frames_roundtrip() {
+        let srv_fc = ServerMsg::FullControl { enabled: true };
+        let srv_json = serde_json::to_value(&srv_fc).unwrap();
+        assert_eq!(srv_json, serde_json::json!({ "type": "fullControl", "enabled": true }));
+        assert_eq!(serde_json::from_value::<ServerMsg>(srv_json).unwrap(), srv_fc);
+
+        let cli_in = ClientMsg::TerminalInput {
+            session_id: "s1".into(),
+            data_b64: "Aw==".into(), // Ctrl+C (0x03)
+        };
+        let cli_json = serde_json::to_value(&cli_in).unwrap();
+        assert_eq!(
+            cli_json,
+            serde_json::json!({ "type": "terminalInput", "sessionId": "s1", "dataB64": "Aw==" })
+        );
+        assert_eq!(serde_json::from_value::<ClientMsg>(cli_json).unwrap(), cli_in);
+
+        // Older Hello frames without fullControl still deserialize with false.
+        let legacy_hello = serde_json::json!({ "type": "hello", "protocol": 1, "peerName": "Old" });
+        assert_eq!(
+            serde_json::from_value::<ClientMsg>(legacy_hello).unwrap(),
+            ClientMsg::Hello {
+                protocol: 1,
+                peer_name: "Old".into(),
+                full_control: false,
+            }
+        );
     }
 }
