@@ -1,4 +1,9 @@
 fn main() {
+    println!("cargo:rerun-if-changed=tauri.conf.json");
+    println!("cargo:rerun-if-changed=icons/icon.ico");
+    println!("cargo:rerun-if-changed=icons/32x32.png");
+    println!("cargo:rerun-if-changed=icons/128x128.png");
+
     tauri_build::build();
 
     // Tauri links its ComCtl32 v6 manifest archive (libresource.a) only to bin targets,
