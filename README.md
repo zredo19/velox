@@ -10,7 +10,10 @@ Lightweight Rust Agentic Development Environment (ADE) desktop terminal built wi
 - **Zero Orphan Processes**: Every PTY and MCP backend runs inside a Windows Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) so closing or hibernating a session immediately cleans up its entire process tree.
 - **Embedded Scale-to-Zero Lazy MCP Gateway**: Native Rust Streamable HTTP MCP gateway (`127.0.0.1:43111`) with schema caching and per-backend idle teardown, plus live RAM/MCP drawer controls.
 - **Bounded Scrollback**: Fixed-capacity ring buffer (default `2 MB` per pane) with GPU-accelerated `xterm.js` WebGL rendering.
-- **Velox Online (team)**: Share sessions with teammates over Tailscale. They appear in the other Velox's sidebar under your name with a live, read-only terminal mirror, and anyone can send a session a task that its owner accepts or rejects. Agents get the same powers through the built-in `velox-team` MCP server (`team_list`, `team_send_task`, `team_task_status`, `team_read_session`), which also lets a lead agent coordinate other sessions on the same PC. Setup: [`docs/online/SETUP.md`](docs/online/SETUP.md) · design: [`docs/online/PLAN.md`](docs/online/PLAN.md).
+- **Velox Online (team) & Mutual "Control total"**: Share sessions with teammates over Tailscale. Shared tabs appear in the other Velox's sidebar with a live terminal mirror (read-only by default) and Accept/Reject task cards. For trusted pairing when one teammate is away, both sides can opt into **Control total** per peer in **Settings → Team** (off by default, requires mutual activation): tasks deliver directly with toast + visible history (waking sleeping shared sessions), the remote terminal becomes interactive (Enter, arrows, `Ctrl+C`), an always-visible titlebar badge shows who has full control, and turning it off on either side cuts access immediately (enforced in the backend; unshared tabs stay invisible and inaccessible). Setup: [`docs/online/SETUP.md`](docs/online/SETUP.md) · design: [`docs/online/PLAN.md`](docs/online/PLAN.md).
+- **Direct Local Session Messaging & Auto-Setup**: On startup, Velox automatically registers the built-in `velox-team` MCP server (`session_list`, `session_send`, `team_list`, `team_send_task`, `team_task_status`, `team_read_session`) across Claude Code and Antigravity CLI configs and installs the `velox` CLI (`velox list`, `velox msg`, `velox read`) onto each tab's `PATH`.
+- **Deterministic Session Persistence**: Claude `SessionStart` and Antigravity `PreInvocation` hooks link each tab deterministically without cross-tab mixups, backed by atomic `.bak` persistence and Windows shutdown capture (`WM_QUERYENDSESSION` / `WM_ENDSESSION`).
+- **Custom Animated Themes, Command Palette & Polish**: 7 animated custom themes (`Ctrl+Shift+T`), authentic agent scenes/icons, Command Palette (`Ctrl+K`), keyboard shortcuts modal (`Ctrl+/`), live font zoom, and code-split lazy overlays.
 
 ## Download (Windows)
 
@@ -33,9 +36,12 @@ Grab `velox.exe` from the [latest release](../../releases/latest) and run it (Wi
 | `Ctrl+W` | Close session (outside the terminal) |
 | `Ctrl+Shift+C` / `Ctrl+V` | Copy / paste (images too) |
 
-## Development
+## Development / Updating
+
+To pull the latest changes and run Velox locally (the `velox-team` MCP server and the `velox` CLI command register themselves automatically on startup):
 
 ```bash
+git pull
 pnpm install
 pnpm tauri dev
 ```
@@ -43,6 +49,16 @@ pnpm tauri dev
 ## Build
 
 ```bash
+git pull
+pnpm install
+pnpm tauri build
+```
+
+Or build the frontend and embedded Rust release executable manually:
+
+```bash
 pnpm build
 cd src-tauri && cargo test && cargo build --release --features custom-protocol
 ```
+
+> **Windows MinGW/GNU note:** `rust-toolchain.toml` uses `channel = "stable"` so MSVC and GNU setups both work. If your machine uses MinGW/WinLibs instead of Visual Studio Build Tools, run `rustup default stable-x86_64-pc-windows-gnu` (or set `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu`).

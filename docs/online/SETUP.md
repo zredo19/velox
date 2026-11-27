@@ -2,23 +2,29 @@
 
 Unos 10 minutos entre los dos. Se hace una sola vez.
 
-## 0. La versión nueva de Velox
+## 0. La versión nueva de Velox (cómo actualizar)
 
-**Rodolfo:** cierra Velox y ábrelo con el acceso directo del escritorio (`Velox.lnk`, que apunta a
-`D:\Workspace\velox\src-tauri\target\release\velox.exe`, ya compilado con Velox Online). Tus
-sesiones vuelven dormidas, como siempre; con un clic retoman su conversación. El MCP
-`velox-team` ya quedó registrado en tus perfiles de Claude (`~/.claude`, `-personal`,
-`-trabajo`) y en agy.
+Al arrancar Velox **el MCP `velox-team` y el comando CLI `velox` (`velox list`, `velox msg`, `velox read`) se registran e instalan solos** automáticamente para Claude Code (todos tus perfiles `~/.claude*`) y Antigravity CLI (`~/.gemini/config/mcp_config.json` y `~/.gemini/antigravity-cli/mcp_config.json`), junto con las reglas globales y los hooks de persistencia de sesión. No hace falta correr scripts manuales salvo que uses un setup personalizado.
 
-**Benjamín:** copia `velox.exe` (está en `D:\Workspace\velox-online\release\`) a su PC y ábrelo.
-Para que sus agentes puedan usar las herramientas del equipo, en PowerShell:
+**Rodolfo:** cierra el Velox actual, reemplaza `D:\Workspace\velox\src-tauri\target\release\velox.exe` por el binario nuevo (o recompila con `pnpm build` + `cargo build --release --features custom-protocol`), opcionalmente ejecuta `.\scripts\install-shortcut.ps1` para actualizar los accesos directos e íconos, y ábrelo de nuevo. Tus sesiones vuelven dormidas como siempre y retoman su conversación al hacer clic.
+
+**Benjamín (`SrDip12`):** desde tu copia local del repositorio `zredo19/velox`:
 
 ```powershell
-claude mcp add --transport http --scope user velox-team http://127.0.0.1:43111/mcp/velox-team
+git pull
+pnpm install
+pnpm tauri dev
 ```
 
-En agy, agregar en `%USERPROFILE%\.gemini\antigravity-cli\mcp_config.json`, dentro de `mcpServers`:
-`"velox-team": { "serverUrl": "http://127.0.0.1:43111/mcp/velox-team" }`.
+Si prefieres compilar el ejecutable de release:
+
+```powershell
+git pull
+pnpm install
+pnpm tauri build
+```
+
+Al abrir Velox ya quedan registrados solos el MCP `velox-team` y el comando `velox` dentro de cada pestaña.
 
 ## 1. Tailscale
 
@@ -79,19 +85,38 @@ escribe su correo → **Invite** (o **Copy invite link** y se lo mandas). El pla
 ## 3. Uso
 
 - **Ver al otro:** sus sesiones compartidas aparecen bajo su nombre en la barra lateral. Al hacer
-  clic ves su terminal en vivo, solo lectura.
-- **Mandar una tarea a mano:** abre su sesión y escribe en la caja de abajo → **Send task**. El otro
-  ve una tarjeta con **Accept** y **Reject**. Si acepta, Velox la escribe en su terminal.
-- **Que los Claude o agy se coordinen solos:** cada agente tiene el MCP `velox-team`, con
-  `team_list`, `team_send_task`, `team_task_status` y `team_read_session`. El agente líder reparte
-  tareas con `team_send_task` y revisa el avance con `team_read_session`. Cada tarea que llega al
-  otro PC la tiene que aceptar una persona; nunca se ejecuta sola.
-
-- **Un líder coordinando agentes en tu mismo PC (como herdr):** `team_send_task` sin `peer`
-  manda la tarea a una sesión local, y `team_read_session` sin `peer` lee su pantalla. Esto
-  funciona aunque el modo equipo esté apagado. Para que las tareas locales se entreguen sin
-  pedirte confirmación, activa en Ajustes → Team la opción **Auto-approve tasks from this PC**.
-  Las tareas que llegan de otro PC siempre necesitan tu Accept.
+  clic ves su terminal en vivo (solo lectura por defecto).
+- **Mandar una tarea a mano:** abre su sesión y escribe en la caja de abajo → **Send task**. Por
+  defecto, el otro ve una tarjeta con **Accept** y **Reject** y si acepta, Velox la escribe en su
+  terminal.
+- **Modo "Control total" (opt-in mutuo entre compañeros):** pensado para trabajar en equipo cuando
+  uno no está frente al teclado (por ejemplo, responder permisos de Claude/agy o mandar tareas sin
+  esperar Accept):
+  - **Cómo activarlo:** en **Ajustes (`Ctrl+,`) → Team**, cada compañero tiene un interruptor
+    **"Control total"** (apagado por defecto). Solo entra en vigor cuando **ambos** lo encienden
+    mutuamente (si solo uno lo activa, muestra *"Esperando a que \<nombre\> lo active"* y no cambia
+    nada).
+  - **Qué permite cuando está activo:**
+    - Las tareas (`team_send_task` y **Send task** en la UI) se entregan **directo** sin tarjeta de
+      aprobación, quedan registradas en el historial visible del popover de Team y muestran un toast
+      (`"Benjamin → velox 1: …"`). Siguen saneadas igual que siempre.
+    - La vista remota pasa a ser **interactiva**: tu teclado controla directo las sesiones
+      compartidas del otro (incluyendo Enter, flechas, Esc y `Ctrl+C`).
+    - Si la sesión compartida destino está dormida, Velox la despierta automáticamente antes de
+      entregar la tarea (igual que en mensajería local).
+  - **Límites estrictos:** solo aplica a sesiones que el dueño compartió con el botón de transmisión
+    (lo no compartido sigue invisible e inaccesible). Mientras está activo aparece siempre un
+    indicador en la barra de título (**"\<nombre\> tiene control total"**). Apagar el interruptor en
+    **cualquiera** de los dos lados corta el acceso al instante (también en el backend), incluso con
+    una vista remota abierta.
+- **Mensajería directa entre sesiones del mismo PC (`velox list` / `velox msg` / `velox read`):**
+  Velox inyecta `velox` en el `PATH` de cada pestaña y registra el MCP `velox-team` (`session_list`,
+  `session_send`, `team_list`, `team_send_task`, `team_task_status`, `team_read_session`) al
+  arrancar. Los agentes locales pueden hablarse directo sin aprobación manual, despertando sesiones
+  dormidas si hace falta.
+- **Que los Claude o agy se coordinen entre PCs:** el agente líder usa `team_list`, `team_send_task`,
+  `team_task_status` y `team_read_session`. Sin "Control total", cada tarea remota requiere Accept;
+  con "Control total" mutuo activo, se entrega directo a las sesiones compartidas.
 
 ## Si algo no conecta
 
