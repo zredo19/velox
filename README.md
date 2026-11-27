@@ -24,6 +24,7 @@ Grab `velox.exe` from the [latest release](../../releases/latest) and run it (Wi
 | `Ctrl+1` … `Ctrl+9` | Switch to session 1–9 |
 | `Ctrl+Shift+B` | Toggle sidebar |
 | `Ctrl+Shift+M` | MCP gateway drawer |
+| `Ctrl+Shift+T` | Themes & animated wallpapers gallery |
 | `Ctrl+Shift+H` | Sleep the current session |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom in / out / reset terminal font size |
 | `Ctrl+,` | Settings |

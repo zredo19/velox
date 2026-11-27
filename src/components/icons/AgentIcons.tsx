@@ -1,5 +1,7 @@
 import { useId } from "react";
 import { ANTIGRAVITY_PATH, ANTIGRAVITY_RAMPS } from "../../themes/agy/logo";
+import { OPENAI_BLOSSOM_PATH } from "../../themes/codex/logo";
+import { OPENCODE_INNER_BLOCK_PATH, OPENCODE_OUTER_PATH } from "../../themes/opencode/logo";
 import type { AgentKind } from "../../types/ipc";
 
 /* Official Claude mark. */
@@ -8,25 +10,27 @@ const CLAUDE_PATH =
 
 const BLOCKED_COLOR = "#FF3B3B";
 
-/* A soft halo behind the active Claude and Antigravity marks, so they read brighter. */
+/* A soft halo behind active agent marks so they read crisply against dark surfaces. */
 const GLOW = {
   claude: "rgba(240, 143, 105, 0.45)",
   agy: "rgba(120, 170, 255, 0.40)",
+  codex: "rgba(25, 195, 125, 0.42)",
+  opencode: "rgba(244, 242, 240, 0.25)",
 } as const;
 
 const ACTIVE_COLORS: Record<AgentKind, string> = {
   claude: "#F08F69",
   agy: "#4285F4",
-  codex: "#10A37F",
-  opencode: "#C4B5FD",
+  codex: "#19C37D",
+  opencode: "#F4F2F0",
   shell: "#94A3B8",
 };
 
 const MUTED_COLORS: Record<AgentKind, string> = {
   claude: "#A2604A",
   agy: "#3F6DB4",
-  codex: "#166853",
-  opencode: "#6E6591",
+  codex: "#177A54",
+  opencode: "#87827E",
   shell: "#52607A",
 };
 
@@ -119,23 +123,11 @@ export function AgentIcon({
       return (
         <svg
           viewBox="0 0 24 24"
-          fill="none"
           className={className}
           aria-hidden="true"
+          style={active && !blocked ? { filter: `drop-shadow(0 0 3px ${GLOW.codex})` } : undefined}
         >
-          <polygon
-            points="12,2.7 20,7.3 20,16.7 12,21.3 4,16.7 4,7.3"
-            stroke={color}
-            strokeWidth="2"
-            strokeLinejoin="round"
-          />
-          <path
-            d="M9.5 9.5L7.5 12l2 2.5M14.5 9.5l2 2.5-2 2.5"
-            stroke={color}
-            strokeWidth="1.9"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
+          <path d={OPENAI_BLOSSOM_PATH} fill={color} />
         </svg>
       );
 
@@ -143,21 +135,19 @@ export function AgentIcon({
       return (
         <svg
           viewBox="0 0 24 24"
-          fill="none"
           className={className}
           aria-hidden="true"
+          style={
+            active && !blocked ? { filter: `drop-shadow(0 0 3px ${GLOW.opencode})` } : undefined
+          }
         >
+          {/* Inner lower counter block characteristic of the official OpenCode mark */}
           <path
-            d="M12 3l8.5 9L12 21 3.5 12 12 3z"
-            stroke={color}
-            strokeWidth="2"
-            strokeLinejoin="round"
+            d={OPENCODE_INNER_BLOCK_PATH}
+            fill={blocked ? BLOCKED_COLOR : active ? "#6B6662" : "#4A4644"}
+            fillOpacity={blocked ? 0.35 : 0.85}
           />
-          <path
-            d="M12 7.5l4.2 4.5-4.2 4.5L7.8 12 12 7.5z"
-            fill={color}
-            fillOpacity={active ? "0.28" : "0.14"}
-          />
+          <path d={OPENCODE_OUTER_PATH} fill={color} fillRule="evenodd" />
         </svg>
       );
 
@@ -204,7 +194,7 @@ export function VeloxLogo({ className = "w-4 h-4" }: { className?: string }) {
         <linearGradient id={`${id}rim`} x1="0" y1="0" x2="1" y2="1">
           <stop offset="0" stopColor="#F08F69" />
           <stop offset="0.5" stopColor="#7AA8FF" />
-          <stop offset="1" stopColor="#34D3A0" />
+          <stop offset="1" stopColor="#19C37D" />
         </linearGradient>
       </defs>
       <rect x="1.25" y="1.25" width="21.5" height="21.5" rx="5.5" fill={`url(#${id}bg)`} />
@@ -227,7 +217,7 @@ export function VeloxLogo({ className = "w-4 h-4" }: { className?: string }) {
       />
       <path d="M11.6 8.2H18.4" stroke="#F08F69" strokeWidth="2.1" strokeLinecap="round" />
       <path d="M11.6 12H16.6" stroke="#7AA8FF" strokeWidth="2.1" strokeLinecap="round" />
-      <path d="M11.6 15.8H13.6" stroke="#34D3A0" strokeWidth="2.1" strokeLinecap="round" />
+      <path d="M11.6 15.8H13.6" stroke="#19C37D" strokeWidth="2.1" strokeLinecap="round" />
       <rect x="15.2" y="14.6" width="2.3" height="2.4" rx="0.5" fill="#F2F5FB" fillOpacity="0.85" />
     </svg>
   );

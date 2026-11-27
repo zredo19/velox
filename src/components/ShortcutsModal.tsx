@@ -14,6 +14,7 @@ const GROUPS = [
       { keys: ["Ctrl", "1–9"], label: "Switch to session 1–9" },
       { keys: ["Ctrl", "Shift", "B"], label: "Toggle sidebar" },
       { keys: ["Ctrl", "Shift", "M"], label: "Lazy MCP Gateway drawer" },
+      { keys: ["Ctrl", "Shift", "T"], label: "Themes & wallpapers gallery" },
       { keys: ["Ctrl", ","], label: "Open settings" },
       { keys: ["Ctrl", "/"], label: "Keyboard shortcuts" },
     ],

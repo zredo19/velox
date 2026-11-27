@@ -7,7 +7,13 @@ import { Sidebar } from "./components/Sidebar";
 import { TerminalPane } from "./components/TerminalPane";
 import { EmptyState } from "./components/EmptyState";
 import { ThemeBackground } from "./themes/ThemeBackground";
-import { getAgentTheme } from "./themes/registry";
+import {
+  getAgentTheme,
+  loadThemePreference,
+  saveThemePreference,
+  THEME_OPTIONS,
+} from "./themes/registry";
+import type { ThemePreference } from "./themes/types";
 import type { AgentActivity } from "./lib/agentActivity";
 import type { AgentKind, SessionRecord } from "./types/ipc";
 
@@ -26,6 +32,9 @@ const CommandPalette = lazy(() =>
 );
 const ShortcutsModal = lazy(() =>
   import("./components/ShortcutsModal").then((m) => ({ default: m.ShortcutsModal })),
+);
+const ThemePickerModal = lazy(() =>
+  import("./components/ThemePickerModal").then((m) => ({ default: m.ThemePickerModal })),
 );
 
 const DEFAULT_FONT_SIZE = 13;
@@ -62,6 +71,10 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [themesOpen, setThemesOpen] = useState(false);
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() =>
+    loadThemePreference(),
+  );
   const [clearTrigger, setClearTrigger] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const [activity, setActivity] = useState<Record<string, AgentActivity | null>>({});
@@ -90,6 +103,7 @@ export function App() {
   const activeTheme = getAgentTheme(
     activeSession ? (activeSession.activeAgent ?? activeSession.agentKind) : undefined,
     animated,
+    themePreference,
   );
 
   const { visible: visibleSessions } = useMemo(
@@ -130,10 +144,22 @@ export function App() {
   const handleOpenSettings = useCallback(() => setSettingsOpen(true), []);
   const handleOpenPalette = useCallback(() => setPaletteOpen(true), []);
   const handleOpenShortcuts = useCallback(() => setShortcutsOpen(true), []);
+  const handleOpenThemes = useCallback(() => setThemesOpen(true), []);
   const handleCloseMcpDrawer = useCallback(() => setMcpDrawerOpen(false), []);
   const handleCloseSettings = useCallback(() => setSettingsOpen(false), []);
   const handleClosePalette = useCallback(() => setPaletteOpen(false), []);
   const handleCloseShortcuts = useCallback(() => setShortcutsOpen(false), []);
+  const handleCloseThemes = useCallback(() => setThemesOpen(false), []);
+
+  const handleSelectTheme = useCallback(
+    (pref: ThemePreference) => {
+      setThemePreference(pref);
+      saveThemePreference(pref);
+      const label = THEME_OPTIONS.find((t) => t.id === pref)?.label ?? pref;
+      showToast(`Theme · ${label}`);
+    },
+    [showToast],
+  );
 
   const handleLaunch = useCallback(
     (presetId: string, cwd: string, title?: string) => {
@@ -296,6 +322,7 @@ export function App() {
         else if (key === "b") run(() => setSidebarOpen((v) => !v));
         else if (key === "m") run(() => setMcpDrawerOpen((v) => !v));
         else if (key === "p") run(() => setPaletteOpen((v) => !v));
+        else if (key === "t") run(() => setThemesOpen((v) => !v));
         else if (key === "h" && activeSessionId) run(handleSleepActive);
         return;
       }
@@ -341,6 +368,7 @@ export function App() {
         onToggleSidebar={handleToggleSidebar}
         onOpenLauncher={handleOpenDefaultLauncher}
         onOpenPalette={handleOpenPalette}
+        onOpenThemes={handleOpenThemes}
         onOpenShortcuts={handleOpenShortcuts}
         onCopyPath={handleCopyPath}
         activeSession={activeSession}
@@ -418,7 +446,11 @@ export function App() {
                 isActive={activeSessionId === session.id}
                 fontFamily={fontFamily}
                 fontSize={fontSize}
-                theme={getAgentTheme(session.activeAgent ?? session.agentKind, animated)}
+                theme={getAgentTheme(
+                  session.activeAgent ?? session.agentKind,
+                  animated,
+                  themePreference,
+                )}
                 clearTrigger={clearTrigger}
                 onActivity={reportActivity}
                 onWake={handlePaneWake}
@@ -469,6 +501,8 @@ export function App() {
             open={settingsOpen}
             onClose={handleCloseSettings}
             config={config}
+            themePreference={themePreference}
+            onSelectTheme={handleSelectTheme}
             onSave={updateConfig}
           />
         )}
@@ -481,9 +515,12 @@ export function App() {
             presets={presets}
             activeSession={activeSession}
             animatedBackgrounds={animated}
+            themePreference={themePreference}
             onSelectSession={handleSelectSession}
             onQuickLaunch={handleQuickLaunch}
             onOpenLauncher={handleOpenDefaultLauncher}
+            onOpenThemes={handleOpenThemes}
+            onSelectTheme={handleSelectTheme}
             onToggleSidebar={handleToggleSidebar}
             onToggleMcpDrawer={handleToggleMcpDrawer}
             onOpenSettings={handleOpenSettings}
@@ -495,6 +532,17 @@ export function App() {
             onZoomIn={handleZoomIn}
             onZoomOut={handleZoomOut}
             onZoomReset={handleZoomReset}
+          />
+        )}
+
+        {themesOpen && (
+          <ThemePickerModal
+            open={themesOpen}
+            onClose={handleCloseThemes}
+            selected={themePreference}
+            animatedBackgrounds={animated}
+            onSelectTheme={handleSelectTheme}
+            onToggleAnimated={handleToggleAnimated}
           />
         )}
 

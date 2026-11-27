@@ -8,7 +8,7 @@ import type { AgentKind } from "../../types/ipc";
  * Nothing moves while the window is hidden or unfocused.
  */
 
-/* '.' empty, B body, L highlight, D mouth / visor, E eye, A antenna light, F thruster. */
+/* '.' empty, B body, L highlight, D mouth / visor / shadow, E eye, A antenna light, F thruster. */
 interface Critter {
   kind: AgentKind;
   name: string;
@@ -67,48 +67,50 @@ const CREW: readonly Critter[] = [
     glow: "rgba(110, 160, 255, 0.35)",
   },
   {
+    /* Blocky OpenCode "O" critter: crisp off-white frame, dark inner counter & lower block */
     kind: "opencode",
     name: "OpenCode",
     map: [
-      ".....B.....",
-      "....BLB....",
-      "...BLLLB...",
-      "..BBEBEBB..",
+      ".LLLLLLLLL.",
       ".BBBBBBBBB.",
-      "BBBDBBBDBBB",
-      ".BBBDDDBBB.",
-      "..BBBBBBB..",
-      "...BBBBB...",
-      "....B.B....",
+      ".BB.....BB.",
+      ".BB.E.E.BB.",
+      ".BB.....BB.",
+      ".BBDDDDDBB.",
+      ".BBDDDDDBB.",
+      ".BBBBBBBBB.",
+      ".BBBBBBBBB.",
+      "..BB...BB..",
     ],
-    body: ["#C9BBFF"],
-    light: "#ECE6FF",
-    dark: "#2A2340",
-    eye: "#221B36",
-    accent: "#C9BBFF",
-    glow: "rgba(196, 181, 253, 0.32)",
+    body: ["#EDEAE6"],
+    light: "#FFFFFF",
+    dark: "#5C5855",
+    eye: "#FDFCFC",
+    accent: "#9E9994",
+    glow: "rgba(244, 242, 240, 0.28)",
   },
   {
+    /* OpenAI Blossom-inspired Codex critter in iconic OpenAI emerald */
     kind: "codex",
     name: "Codex",
     map: [
-      "...BBBBB...",
-      "..BLLLLLB..",
-      ".BBBBBBBBB.",
+      "...LL.LL...",
+      ".BBB...BBB.",
+      "BBLBBBBBLLB",
       ".BBEBBBEBB.",
-      ".BBBBBBBBB.",
+      "BBBBBBBBBBB",
       ".BBDBBBDBB.",
-      ".BBBDDDBBB.",
-      "..BBBBBBB..",
-      "...BBBBB...",
+      "BB.BDDDB.BB",
+      ".BBB...BBB.",
+      "...BB.BB...",
       "...B...B...",
     ],
-    body: ["#1FC398"],
-    light: "#8CEBCB",
-    dark: "#06281D",
-    eye: "#06281D",
-    accent: "#1FC398",
-    glow: "rgba(31, 195, 152, 0.32)",
+    body: ["#19C37D"],
+    light: "#86F0C5",
+    dark: "#06291C",
+    eye: "#06291C",
+    accent: "#38E0A0",
+    glow: "rgba(25, 195, 125, 0.38)",
   },
 ];
 

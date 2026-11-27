@@ -1,12 +1,16 @@
 import { useEffect, useState } from "react";
-import { FolderOpen, Settings, X } from "lucide-react";
+import { Check, FolderOpen, Palette, Settings, X } from "lucide-react";
 import { veloxApi } from "../lib/tauri";
+import { THEME_OPTIONS } from "../themes/registry";
+import type { ThemePreference } from "../themes/types";
 import type { VeloxConfig } from "../types/ipc";
 
 export interface SettingsModalProps {
   open: boolean;
   onClose: () => void;
   config: VeloxConfig | null;
+  themePreference: ThemePreference;
+  onSelectTheme: (pref: ThemePreference) => void;
   onSave: (next: VeloxConfig) => Promise<void>;
 }
 
@@ -70,6 +74,8 @@ export function SettingsModal({
   open,
   onClose,
   config,
+  themePreference,
+  onSelectTheme,
   onSave,
 }: SettingsModalProps) {
   const [draft, setDraft] = useState<VeloxConfig | null>(config);
@@ -419,7 +425,7 @@ export function SettingsModal({
                   Animated backgrounds
                 </div>
                 <div className="text-[11.5px] text-[var(--velox-ink-soft)]">
-                  Live OffscreenCanvas wallpaper for Claude, Antigravity, Codex & OpenCode
+                  Live OffscreenCanvas wallpaper for agents & custom themes
                 </div>
               </div>
               <ToggleSwitch
@@ -428,6 +434,63 @@ export function SettingsModal({
                   setDraft({ ...draft, animatedBackgrounds: checked })
                 }
               />
+            </div>
+
+            {/* Theme selector */}
+            <div className="pt-1">
+              <div className="flex items-center justify-between mb-2">
+                <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--velox-ink-secondary)]">
+                  <Palette className="w-3.5 h-3.5 text-[var(--velox-accent-soft)]" />
+                  Appearance & custom themes
+                </span>
+                <span className="text-[11px] text-[var(--velox-ink-muted)]">
+                  Applies live
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                {THEME_OPTIONS.map((meta) => {
+                  const active = themePreference === meta.id;
+                  const [bg, , accent, accentSoft] = meta.swatches;
+                  return (
+                    <button
+                      key={meta.id}
+                      type="button"
+                      onClick={() => onSelectTheme(meta.id)}
+                      style={{
+                        borderColor: active ? accent : "rgba(255, 255, 255, 0.07)",
+                      }}
+                      className={`px-2.5 py-2 rounded-lg border text-left flex items-center gap-2 transition-all cursor-pointer ${
+                        active
+                          ? "bg-[var(--velox-active)] text-[var(--velox-ink)]"
+                          : "bg-[var(--velox-canvas)]/70 hover:bg-[var(--velox-elevated)] text-[var(--velox-ink-secondary)]"
+                      }`}
+                    >
+                      <span
+                        className="w-5 h-5 rounded-md border border-white/15 shrink-0 flex items-center justify-center"
+                        style={{ backgroundColor: bg }}
+                      >
+                        {active ? (
+                          <Check className="w-3 h-3" style={{ color: accent }} />
+                        ) : (
+                          <span className="flex gap-0.5">
+                            <span
+                              className="w-1.5 h-1.5 rounded-full"
+                              style={{ backgroundColor: accent }}
+                            />
+                            <span
+                              className="w-1.5 h-1.5 rounded-full"
+                              style={{ backgroundColor: accentSoft }}
+                            />
+                          </span>
+                        )}
+                      </span>
+                      <span className="text-[11.5px] font-medium truncate">
+                        {meta.label}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </section>
         </div>

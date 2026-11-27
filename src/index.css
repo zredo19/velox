@@ -49,36 +49,148 @@
   --velox-accent-soft: #9ED0FF;
 }
 
-/* Codex sessions: emerald obsidian chrome. */
+/* Codex sessions: OpenAI emerald obsidian chrome. */
 [data-agent-theme="codex"] {
-  --velox-canvas: #091311;
-  --velox-surface: #0D1A17;
-  --velox-elevated: #132521;
-  --velox-hover: #18302A;
-  --velox-active: #1D3A33;
-  --velox-ink: #E6F4F0;
-  --velox-ink-secondary: #98BCB2;
-  --velox-ink-muted: #5F847A;
-  --velox-ink-soft: #789F95;
-  --velox-ink-faint: #46665E;
-  --velox-accent: #1FC398;
+  --velox-canvas: #091310;
+  --velox-surface: #0D1A15;
+  --velox-elevated: #13251F;
+  --velox-hover: #183028;
+  --velox-active: #1D3A30;
+  --velox-ink: #E6F4EF;
+  --velox-ink-secondary: #98BCB0;
+  --velox-ink-muted: #5F8478;
+  --velox-ink-soft: #789F92;
+  --velox-ink-faint: #46665C;
+  --velox-accent: #19C37D;
   --velox-accent-soft: #7CEAD0;
 }
 
-/* OpenCode sessions: twilight violet chrome. */
+/* OpenCode sessions: authentic minimalist warm charcoal & off-white chrome. */
 [data-agent-theme="opencode"] {
-  --velox-canvas: #0E0C18;
-  --velox-surface: #141122;
-  --velox-elevated: #1C1830;
-  --velox-hover: #241F3D;
-  --velox-active: #2C264A;
-  --velox-ink: #ECE8F8;
-  --velox-ink-secondary: #ABA3C8;
-  --velox-ink-muted: #726A94;
-  --velox-ink-soft: #8D85B0;
-  --velox-ink-faint: #564E76;
-  --velox-accent: #A78BFA;
-  --velox-accent-soft: #DDD6FE;
+  --velox-canvas: #141212;
+  --velox-surface: #1A1717;
+  --velox-elevated: #23201F;
+  --velox-hover: #2C2827;
+  --velox-active: #35302E;
+  --velox-ink: #F4F2F0;
+  --velox-ink-secondary: #B8B2AD;
+  --velox-ink-muted: #7C7672;
+  --velox-ink-soft: #96908B;
+  --velox-ink-faint: #5C5754;
+  --velox-accent: #E8E4DF;
+  --velox-accent-soft: #FFFFFF;
+}
+
+/* Custom Theme: Tokyo Night */
+[data-agent-theme="tokyo-night"] {
+  --velox-canvas: #131522;
+  --velox-surface: #181B2C;
+  --velox-elevated: #20243A;
+  --velox-hover: #272C47;
+  --velox-active: #2F3656;
+  --velox-ink: #C8D3F5;
+  --velox-ink-secondary: #9AA5CE;
+  --velox-ink-muted: #636DA6;
+  --velox-ink-soft: #7E89BA;
+  --velox-ink-faint: #4C5582;
+  --velox-accent: #7AA2F7;
+  --velox-accent-soft: #B4CEFF;
+}
+
+/* Custom Theme: Catppuccin Mocha */
+[data-agent-theme="catppuccin"] {
+  --velox-canvas: #181825;
+  --velox-surface: #1E1E2E;
+  --velox-elevated: #27273C;
+  --velox-hover: #313244;
+  --velox-active: #3B3B54;
+  --velox-ink: #CDD6F4;
+  --velox-ink-secondary: #A6ADC8;
+  --velox-ink-muted: #6C7086;
+  --velox-ink-soft: #8990AC;
+  --velox-ink-faint: #585B70;
+  --velox-accent: #CBA6F7;
+  --velox-accent-soft: #E5D0FF;
+}
+
+/* Custom Theme: Synthwave '84 */
+[data-agent-theme="synthwave"] {
+  --velox-canvas: #120B1F;
+  --velox-surface: #190F2B;
+  --velox-elevated: #23163D;
+  --velox-hover: #2E1D4F;
+  --velox-active: #3A2363;
+  --velox-ink: #F4EAFF;
+  --velox-ink-secondary: #C4AEE6;
+  --velox-ink-muted: #846BA8;
+  --velox-ink-soft: #A086C4;
+  --velox-ink-faint: #644C87;
+  --velox-accent: #FF2E97;
+  --velox-accent-soft: #FF8BC4;
+}
+
+/* Custom Theme: Nord Frost */
+[data-agent-theme="nord"] {
+  --velox-canvas: #181E28;
+  --velox-surface: #1E2532;
+  --velox-elevated: #273041;
+  --velox-hover: #303B50;
+  --velox-active: #39465E;
+  --velox-ink: #ECEFF4;
+  --velox-ink-secondary: #B8C4D6;
+  --velox-ink-muted: #72829E;
+  --velox-ink-soft: #8FA0BC;
+  --velox-ink-faint: #586782;
+  --velox-accent: #88C0D0;
+  --velox-accent-soft: #BFE6F0;
+}
+
+/* Custom Theme: Dracula */
+[data-agent-theme="dracula"] {
+  --velox-canvas: #171824;
+  --velox-surface: #1E2030;
+  --velox-elevated: #26293E;
+  --velox-hover: #2F334C;
+  --velox-active: #393E5C;
+  --velox-ink: #F8F8F2;
+  --velox-ink-secondary: #BABED8;
+  --velox-ink-muted: #767CA3;
+  --velox-ink-soft: #949AC0;
+  --velox-ink-faint: #5B6185;
+  --velox-accent: #BD93F9;
+  --velox-accent-soft: #DFC7FF;
+}
+
+/* Custom Theme: Gruvbox Dark */
+[data-agent-theme="gruvbox"] {
+  --velox-canvas: #1B1917;
+  --velox-surface: #22201D;
+  --velox-elevated: #2C2925;
+  --velox-hover: #36322D;
+  --velox-active: #423C35;
+  --velox-ink: #FBF1C7;
+  --velox-ink-secondary: #D5C4A1;
+  --velox-ink-muted: #928374;
+  --velox-ink-soft: #B0A08A;
+  --velox-ink-faint: #73665A;
+  --velox-accent: #FABD2F;
+  --velox-accent-soft: #FFE08A;
+}
+
+/* Custom Theme: Matrix Rain */
+[data-agent-theme="matrix"] {
+  --velox-canvas: #060E09;
+  --velox-surface: #0A160E;
+  --velox-elevated: #102418;
+  --velox-hover: #163222;
+  --velox-active: #1C402B;
+  --velox-ink: #D4FFE8;
+  --velox-ink-secondary: #8BC9A8;
+  --velox-ink-muted: #4C8567;
+  --velox-ink-soft: #66A383;
+  --velox-ink-faint: #35634B;
+  --velox-accent: #00E676;
+  --velox-accent-soft: #80FFBF;
 }
 
 html,

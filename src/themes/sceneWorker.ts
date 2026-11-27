@@ -7,6 +7,15 @@ import { createAgyScene } from "./agy/agyScene";
 import { createClaudeScene } from "./claude/claudeScene";
 import { createCodexScene } from "./codex/codexScene";
 import { createOpencodeScene } from "./opencode/opencodeScene";
+import {
+  createCatppuccinScene,
+  createDraculaScene,
+  createGruvboxScene,
+  createMatrixScene,
+  createNordScene,
+  createSynthwaveScene,
+  createTokyoNightScene,
+} from "./custom/customScenes";
 import { runScene, type SceneLoop } from "./shared/sceneLoop";
 import type { Scene } from "./types";
 import type { SceneWorkerReply, SceneWorkerRequest } from "./sceneWorkerProtocol";
@@ -16,6 +25,13 @@ const SCENES: Record<string, () => Scene> = {
   claude: createClaudeScene,
   codex: createCodexScene,
   opencode: createOpencodeScene,
+  "tokyo-night": createTokyoNightScene,
+  catppuccin: createCatppuccinScene,
+  synthwave: createSynthwaveScene,
+  nord: createNordScene,
+  dracula: createDraculaScene,
+  gruvbox: createGruvboxScene,
+  matrix: createMatrixScene,
 };
 
 const port = self as unknown as {

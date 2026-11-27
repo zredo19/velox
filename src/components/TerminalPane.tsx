@@ -239,7 +239,7 @@ export const TerminalPane = memo(function TerminalPane({
         ev.ctrlKey &&
         !ev.altKey &&
         (ev.shiftKey
-          ? ["n", "b", "m", "h", "p"].includes(key)
+          ? ["n", "b", "m", "h", "p", "t"].includes(key)
           : /^[n,k/0=+-1-9]$/.test(key))
       ) {
         return false;

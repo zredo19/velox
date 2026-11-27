@@ -5,6 +5,7 @@ import {
   Cpu,
   Keyboard,
   Minus,
+  Palette,
   PanelLeft,
   Plus,
   Search,
@@ -24,6 +25,7 @@ export interface TitleBarProps {
   onToggleSidebar: () => void;
   onOpenLauncher: () => void;
   onOpenPalette: () => void;
+  onOpenThemes: () => void;
   onOpenShortcuts: () => void;
   onCopyPath?: (path: string) => void;
   activeSession: SessionRecord | null;
@@ -53,6 +55,7 @@ export const TitleBar = memo(function TitleBar({
   onToggleSidebar,
   onOpenLauncher,
   onOpenPalette,
+  onOpenThemes,
   onOpenShortcuts,
   onCopyPath,
   activeSession,
@@ -270,6 +273,16 @@ export const TitleBar = memo(function TitleBar({
             <span>
               MCP {activeMcps}/{totalMcps}
             </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenThemes}
+            title="Themes & wallpapers (Ctrl+Shift+T)"
+            aria-label="Open theme picker"
+            className="h-6 w-6 flex items-center justify-center rounded-md text-[var(--velox-accent-soft)] hover:text-[var(--velox-ink)] hover:bg-[var(--velox-hover)] transition-colors cursor-pointer"
+          >
+            <Palette className="w-3.5 h-3.5" />
           </button>
 
           <button

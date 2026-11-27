@@ -1,3 +1,4 @@
+import { context2d, createCanvas } from "../shared/canvas";
 import { bayer } from "../shared/dither";
 import {
   BLOCK,
@@ -9,90 +10,62 @@ import {
 } from "../shared/glyphs";
 import { createSpriteScene, type Emblem, type Mascot } from "../shared/scene";
 import type { Scene } from "../types";
+import { OPENAI_BLOSSOM_PATH } from "./logo";
 
-/* Emerald-mint shades for the geometric hexagon core. */
-const SHADES = ["#B2F5DF", "#5EEAD4", "#1FC398", "#118A6B", "#0B5D49"] as const;
-const GLYPH_INK = "rgba(8, 20, 17, 0.56)";
+/* Iconic OpenAI emerald-mint shades for the sampled Blossom emblem. */
+const SHADES = ["#B6FCE0", "#5CF0B8", "#19C37D", "#12915D", "#0B5F3E"] as const;
+const GLYPH_INK = "rgba(7, 20, 15, 0.56)";
 
-const HEX_ALPHA = 0.88;
-const PULSE_SPEED = 2.0;
-const SWEEP_SPEED = 1.45;
+const BLOSSOM_ALPHA = 0.9;
+const SWEEP_SPEED = 1.5;
+const TURN_SECONDS = 120;
 const FLOAT_PX = 6;
-const FLOAT_SPEED = 1.15;
+const FLOAT_SPEED = 1.2;
+const SIZE = 2.15;
 
-interface HexCell {
-  cx: number;
-  cy: number;
+interface BlossomCell {
   dx: number;
   dy: number;
-  normDist: number;
+  dist: number;
   angle: number;
-  ring: boolean;
   dither: number;
 }
 
-/** Pointy-top hexagon SDF distance normalized to radius 1. */
-function hexDist(x: number, y: number): number {
-  const ax = Math.abs(x);
-  const ay = Math.abs(y);
-  return Math.max(ax * 0.8660254 + ay * 0.5, ay);
+/** Sample the real official OpenAI Blossom SVG Path2D into grid cells once per resize. */
+function sampleBlossomCells(radius: number): BlossomCell[] {
+  const ctx = context2d(createCanvas(1, 1));
+  if (!ctx) return [];
+  const path = new Path2D(OPENAI_BLOSSOM_PATH);
+  const count = Math.ceil((radius * SIZE) / CELL);
+  const unit = 24 / count;
+  const cells: BlossomCell[] = [];
+
+  for (let row = 0; row < count; row++) {
+    for (let col = 0; col < count; col++) {
+      if (!ctx.isPointInPath(path, (col + 0.5) * unit, (row + 0.5) * unit)) continue;
+      const dx = (col - count / 2) * CELL;
+      const dy = (row - count / 2) * CELL;
+      const dist = Math.hypot(dx, dy) / (radius * SIZE * 0.52);
+      cells.push({
+        dx,
+        dy,
+        dist: Math.min(1, dist),
+        angle: Math.atan2(dy, dx),
+        dither: bayer(col, row) - 0.5,
+      });
+    }
+  }
+  return cells;
 }
 
-function createHexCore(): Emblem {
-  let radius = 90;
+function createBlossomEmblem(): Emblem {
+  let cells: BlossomCell[] = [];
   let atlas: GlyphAtlas | null = null;
   let atlasDpr = 0;
-  let cells: HexCell[] = [];
-  let cellsKey = "";
-
-  const cellsFor = (bx: number, by: number): HexCell[] => {
-    const key = `${bx},${by},${radius}`;
-    if (key === cellsKey) return cells;
-    cellsKey = key;
-    const outer = radius * 1.08;
-    const x0 = Math.floor((bx - outer) / CELL);
-    const x1 = Math.ceil((bx + outer) / CELL);
-    const y0 = Math.floor((by - outer) / CELL);
-    const y1 = Math.ceil((by + outer) / CELL);
-    cells = [];
-
-    for (let cy = y0; cy <= y1; cy++) {
-      for (let cx = x0; cx <= x1; cx++) {
-        const dx = cx * CELL + CELL / 2 - bx;
-        const dy = cy * CELL + CELL / 2 - by;
-        const hd = hexDist(dx / radius, dy / radius);
-        if (hd > 1.02) continue;
-
-        // Outer hexagonal frame + inner code-bracket chevrons (< >) + pulsing core
-        const inFrame = hd >= 0.72 && hd <= 0.98;
-        const nx = dx / radius;
-        const ny = dy / radius;
-        const absY = Math.abs(ny);
-        const leftChev = Math.abs(nx + 0.34 - absY * 0.62) < 0.115 && absY < 0.34;
-        const rightChev = Math.abs(nx - 0.34 + absY * 0.62) < 0.115 && absY < 0.34;
-        const centerDot = Math.hypot(nx, ny) < 0.14;
-
-        if (!inFrame && !leftChev && !rightChev && !centerDot) continue;
-
-        cells.push({
-          cx,
-          cy,
-          dx,
-          dy,
-          normDist: Math.min(1, hd),
-          angle: Math.atan2(dy, dx),
-          ring: inFrame,
-          dither: bayer(cx, cy) - 0.5,
-        });
-      }
-    }
-    return cells;
-  };
 
   return {
     prepare(nextRadius, dpr) {
-      radius = nextRadius;
-      cellsKey = "";
+      cells = sampleBlossomCells(nextRadius);
       if (!atlas || atlasDpr !== dpr) {
         atlas = createGlyphAtlas(dpr, GLYPH_INK, SHADES);
         atlasDpr = dpr;
@@ -101,27 +74,33 @@ function createHexCore(): Emblem {
 
     float: { px: FLOAT_PX, speed: FLOAT_SPEED },
 
-    draw(ctx, t, bx, by) {
+    draw(ctx, t, centreX, centreY) {
       if (!atlas) return;
       const { canvas, tile } = atlas;
       const tick = shimmerTick(t);
       const sweep = t * SWEEP_SPEED;
-      const pulse = 0.5 + 0.5 * Math.sin(t * PULSE_SPEED);
+      const turn = (t / TURN_SECONDS) * Math.PI * 2;
+      const cosT = Math.cos(turn);
+      const sinT = Math.sin(turn);
+      const x0 = Math.round(centreX);
+      const y0 = Math.round(centreY);
 
-      for (const cell of cellsFor(bx, by)) {
-        const light = Math.cos(cell.angle - sweep);
-        const base = cell.ring ? 0.52 + cell.normDist * 0.25 : 0.22 - pulse * 0.15;
-        const k = base + cell.dither * 0.16 - light * 0.24;
+      for (const cell of cells) {
+        // Gentle orbital turn around the blossom centre
+        const rx = cell.dx * cosT - cell.dy * sinT;
+        const ry = cell.dx * sinT + cell.dy * cosT;
+        const light = Math.cos(cell.angle + turn - sweep);
+        const k = 0.25 + cell.dist * 0.45 + cell.dither * 0.16 - light * 0.26;
         const shade = Math.min(SHADES.length - 1, Math.max(0, Math.floor(k * SHADES.length)));
-        const glyph = shimmerGlyphAtTick(cell.cx, cell.cy, tick);
+        const glyph = shimmerGlyphAtTick(Math.round(cell.dx / CELL), Math.round(cell.dy / CELL), tick);
         ctx.drawImage(
           canvas,
           glyph * tile,
           shade * tile,
           tile,
           tile,
-          cell.cx * CELL,
-          cell.cy * CELL,
+          Math.round(x0 + rx),
+          Math.round(y0 + ry),
           BLOCK,
           BLOCK,
         );
@@ -130,17 +109,17 @@ function createHexCore(): Emblem {
   };
 }
 
-/* Pixel Codex critter matching AgentCrew. */
+/* OpenAI Blossom pixel critter matching AgentCrew. */
 const BODY_MAP = [
-  "...BBBBB...",
-  "..BLLLLLB..",
-  ".BBBBBBBBB.",
+  "...LL.LL...",
+  ".BBB...BBB.",
+  "BBLBBBBBLLB",
   ".BBEBBBEBB.",
-  ".BBBBBBBBB.",
+  "BBBBBBBBBBB",
   ".BBDBBBDBB.",
-  ".BBBDDDBBB.",
-  "..BBBBBBB..",
-  "...BBBBB...",
+  "BB.BDDDB.BB",
+  ".BBB...BBB.",
+  "...BB.BB...",
 ] as const;
 
 const FEET = ["...B...B...", "..B.....B.."] as const;
@@ -163,10 +142,10 @@ const codexMascot: Mascot = {
         for (let c = 0; c < line.length; c++) {
           const ch = line[c];
           if (ch === ".") continue;
-          if (ch === "E") ctx.fillStyle = blinking ? "#1FC398" : "#06281D";
-          else if (ch === "L") ctx.fillStyle = "#8CEBCB";
-          else if (ch === "D") ctx.fillStyle = "#06281D";
-          else ctx.fillStyle = "#1FC398";
+          if (ch === "E") ctx.fillStyle = blinking ? "#19C37D" : "#06291C";
+          else if (ch === "L") ctx.fillStyle = "#86F0C5";
+          else if (ch === "D") ctx.fillStyle = "#06291C";
+          else ctx.fillStyle = "#19C37D";
           ctx.fillRect(x + c * PX, y + (r + rowOffset) * PX, PX - 0.5, PX - 0.5);
         }
       });
@@ -179,15 +158,15 @@ const codexMascot: Mascot = {
 export function createCodexScene(): Scene {
   return createSpriteScene({
     seed: 71,
-    haloColor: "rgba(31, 195, 152, 0.34)",
-    cloudLow: "rgba(120, 196, 178, 0.09)",
-    cloudHigh: "rgba(120, 196, 178, 0.16)",
-    glow: "rgba(16, 163, 127, 0.08)",
-    ambientColors: ["#1FC398", "#5EEAD4", "#34D399"],
-    ambientGlyphs: ["<", ">", "/", "{", "}", "+", ":", ";"],
-    sparkColors: ["#8CEBCB", "#1FC398", "#5EEAD4"],
-    emblemAlpha: HEX_ALPHA,
-    createEmblem: createHexCore,
+    haloColor: "rgba(25, 195, 125, 0.36)",
+    cloudLow: "rgba(116, 198, 166, 0.09)",
+    cloudHigh: "rgba(116, 198, 166, 0.16)",
+    glow: "rgba(16, 163, 127, 0.09)",
+    ambientColors: ["#19C37D", "#5CF0B8", "#34D399"],
+    ambientGlyphs: ["{", "}", "<", ">", "/", "+", ":", ";"],
+    sparkColors: ["#86F0C5", "#19C37D", "#5CF0B8"],
+    emblemAlpha: BLOSSOM_ALPHA,
+    createEmblem: createBlossomEmblem,
     mascot: codexMascot,
   });
 }

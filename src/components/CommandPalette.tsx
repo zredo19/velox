@@ -4,6 +4,7 @@ import {
   Eraser,
   Keyboard,
   Moon,
+  Palette,
   PanelLeft,
   Play,
   Plus,
@@ -16,6 +17,8 @@ import {
   RotateCcw,
 } from "lucide-react";
 import type { AgentPreset, SessionRecord } from "../types/ipc";
+import { THEME_OPTIONS } from "../themes/registry";
+import type { ThemePreference } from "../themes/types";
 import { AgentIcon } from "./icons/AgentIcons";
 
 export interface CommandPaletteProps {
@@ -25,9 +28,12 @@ export interface CommandPaletteProps {
   presets: AgentPreset[];
   activeSession: SessionRecord | null;
   animatedBackgrounds: boolean;
+  themePreference: ThemePreference;
   onSelectSession: (id: string) => void;
   onQuickLaunch: (presetId: string) => void;
   onOpenLauncher: () => void;
+  onOpenThemes: () => void;
+  onSelectTheme: (pref: ThemePreference) => void;
   onToggleSidebar: () => void;
   onToggleMcpDrawer: () => void;
   onOpenSettings: () => void;
@@ -43,7 +49,7 @@ export interface CommandPaletteProps {
 
 interface PaletteItem {
   id: string;
-  section: "Sessions" | "Launch Agent" | "Actions";
+  section: "Sessions" | "Launch Agent" | "Themes" | "Actions";
   label: string;
   subtitle?: string;
   keywords: string;
@@ -79,9 +85,12 @@ export function CommandPalette({
   presets,
   activeSession,
   animatedBackgrounds,
+  themePreference,
   onSelectSession,
   onQuickLaunch,
   onOpenLauncher,
+  onOpenThemes,
+  onSelectTheme,
   onToggleSidebar,
   onToggleMcpDrawer,
   onOpenSettings,
@@ -209,6 +218,16 @@ export function CommandPalette({
         run: onToggleMcpDrawer,
       },
       {
+        id: "action:themes",
+        section: "Actions",
+        label: "Open Theme Gallery…",
+        subtitle: "Browse custom themes and animated wallpapers",
+        keywords: "theme palette wallpaper color appearance custom",
+        shortcut: "Ctrl+Shift+T",
+        icon: <Palette className="w-4 h-4 text-[var(--velox-accent-soft)]" />,
+        run: onOpenThemes,
+      },
+      {
         id: "action:animated",
         section: "Actions",
         label: animatedBackgrounds
@@ -268,15 +287,36 @@ export function CommandPalette({
       },
     );
 
+    for (const meta of THEME_OPTIONS) {
+      out.push({
+        id: `theme:${meta.id}`,
+        section: "Themes",
+        label: `Theme: ${meta.label}`,
+        subtitle: meta.description,
+        keywords: `theme color wallpaper ${meta.label} ${meta.id} ${meta.description}`,
+        badge: themePreference === meta.id ? "active" : undefined,
+        icon: (
+          <span
+            className="w-3.5 h-3.5 rounded-full border border-white/20"
+            style={{ backgroundColor: meta.swatches[2] }}
+          />
+        ),
+        run: () => onSelectTheme(meta.id),
+      });
+    }
+
     return out;
   }, [
     sessions,
     presets,
     activeSession,
     animatedBackgrounds,
+    themePreference,
     onSelectSession,
     onQuickLaunch,
     onOpenLauncher,
+    onOpenThemes,
+    onSelectTheme,
     onToggleSidebar,
     onToggleMcpDrawer,
     onOpenSettings,
