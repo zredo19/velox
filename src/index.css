@@ -517,3 +517,48 @@ main[data-velox-scene-main] {
     transition: none !important;
   }
 }
+
+/* ---- Velox Online (remote mirror & task attention pulse) ------------------------------ */
+
+.velox-remote-xterm .xterm {
+  padding: 8px 12px;
+}
+
+.velox-remote-xterm .xterm-viewport {
+  overflow-y: auto !important;
+  scrollbar-width: none;
+}
+
+.velox-remote-xterm .xterm-viewport::-webkit-scrollbar {
+  display: none;
+}
+
+.velox-remote-xterm .xterm-screen {
+  width: var(--velox-remote-screen-w, auto) !important;
+  height: var(--velox-remote-screen-h, auto) !important;
+}
+
+@keyframes velox-task-attention {
+  0%,
+  100% {
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 0 0 0 rgba(245, 185, 113, 0);
+  }
+  50% {
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 0 0 2px rgba(245, 185, 113, 0.35);
+  }
+}
+
+.velox-task-pulse {
+  animation: velox-task-attention 900ms ease-out 2;
+}
+
+.velox-dot-pulse {
+  animation: pulse 900ms ease-in-out 2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .velox-task-pulse,
+  .velox-dot-pulse {
+    animation: none;
+  }
+}
