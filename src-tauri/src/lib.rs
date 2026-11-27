@@ -8,7 +8,8 @@ pub mod telemetry;
 
 use crate::domain::config::VeloxConfig;
 use crate::mcp::gateway::McpGatewayManager;
-use crate::session::manager::SessionManager;
+use crate::session::manager::{SessionManager, SessionTap};
+use crate::team::hub::TeamHub;
 use crate::telemetry::monitor::TelemetryMonitor;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,20 +22,24 @@ pub struct AppState {
     pub sessions: Arc<SessionManager>,
     pub mcp: McpGatewayManager,
     pub telemetry: Arc<TelemetryMonitor>,
+    pub team: Arc<TeamHub>,
 }
 
 impl AppState {
     pub fn new(config: VeloxConfig) -> Self {
+        let team_config = config.team.clone();
         let mcp = McpGatewayManager::new(
             PathBuf::from(&config.mcp_backends_path),
             config.mcp_gateway_port,
         );
         let sessions = Arc::new(SessionManager::new(config));
         let telemetry = Arc::new(TelemetryMonitor::new());
+        let team = TeamHub::new(Arc::clone(&sessions), team_config);
         Self {
             sessions,
             mcp,
             telemetry,
+            team,
         }
     }
 }
@@ -64,6 +69,7 @@ pub fn run() {
             commands::sessions::close_session,
             commands::sessions::rename_session,
             commands::sessions::reorder_sessions,
+            commands::sessions::set_session_shared,
             commands::sessions::write_pty,
             commands::sessions::resize_pty,
             commands::sessions::get_scrollback,
@@ -78,16 +84,34 @@ pub fn run() {
             commands::system::get_telemetry,
             commands::system::get_config,
             commands::system::update_config,
+            commands::team::get_team_status,
+            commands::team::team_subscribe,
+            commands::team::team_unsubscribe,
+            commands::team::send_team_task,
+            commands::team::list_team_tasks,
+            commands::team::respond_team_task,
+            commands::team::generate_team_token,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
             let setup_state = state.clone();
 
+            let tap: Arc<dyn SessionTap> = setup_state.team.clone();
+            setup_state.sessions.set_tap(tap);
+            setup_state.team.start(handle.clone());
+
             // Boot embedded Lazy MCP Gateway if enabled
             if mcp_enabled {
                 let mcp_handle = handle.clone();
                 let mcp_mgr = setup_state.mcp.clone();
+                let team_hub = setup_state.team.clone();
                 tauri::async_runtime::spawn(async move {
+                    mcp_mgr
+                        .register_builtin(
+                            team::mcp::TEAM_MCP_NAME,
+                            Arc::new(team::mcp::TeamMcp::new(team_hub)),
+                        )
+                        .await;
                     match mcp_mgr.start().await {
                         Ok(snapshot) => {
                             let _ = mcp_handle.emit("mcp-updated", snapshot);
@@ -164,7 +188,10 @@ pub fn run() {
     app.run(move |_app_handle, event| {
         if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
             state_for_exit.sessions.shutdown();
-            tauri::async_runtime::block_on(state_for_exit.mcp.shutdown());
+            tauri::async_runtime::block_on(async {
+                state_for_exit.team.shutdown().await;
+                state_for_exit.mcp.shutdown().await;
+            });
         }
     });
 }

@@ -18,7 +18,13 @@ pub fn get_config(state: State<'_, AppState>) -> VeloxResult<VeloxConfig> {
     Ok(state.sessions.get_config())
 }
 
-#[tauri::command(async)]
-pub fn update_config(state: State<'_, AppState>, config: VeloxConfig) -> VeloxResult<VeloxConfig> {
-    state.sessions.update_config(config)
+#[tauri::command]
+pub async fn update_config(
+    state: State<'_, AppState>,
+    config: VeloxConfig,
+) -> VeloxResult<VeloxConfig> {
+    let team_cfg = config.team.clone();
+    let updated = state.sessions.update_config(config)?;
+    state.team.apply_config(team_cfg).await;
+    Ok(updated)
 }

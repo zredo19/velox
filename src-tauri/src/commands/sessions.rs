@@ -44,7 +44,9 @@ pub fn sleep_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> VeloxResult<SessionRecord> {
-    state.sessions.sleep_session(&app, &session_id)
+    let record = state.sessions.sleep_session(&app, &session_id)?;
+    state.team.sync_local_sessions_now();
+    Ok(record)
 }
 
 #[tauri::command(async)]
@@ -53,9 +55,11 @@ pub fn sleep_idle_sessions(
     state: State<'_, AppState>,
     exclude_session_id: Option<String>,
 ) -> VeloxResult<Vec<SessionRecord>> {
-    state
+    let records = state
         .sessions
-        .sleep_idle_sessions(&app, exclude_session_id.as_deref())
+        .sleep_idle_sessions(&app, exclude_session_id.as_deref())?;
+    state.team.sync_local_sessions_now();
+    Ok(records)
 }
 
 #[tauri::command(async)]
@@ -64,7 +68,9 @@ pub fn close_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> VeloxResult<()> {
-    state.sessions.close_session(&app, &session_id)
+    state.sessions.close_session(&app, &session_id)?;
+    state.team.sync_local_sessions_now();
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -74,7 +80,23 @@ pub fn rename_session(
     session_id: String,
     title: String,
 ) -> VeloxResult<SessionRecord> {
-    state.sessions.rename_session(&app, &session_id, title)
+    let record = state.sessions.rename_session(&app, &session_id, title)?;
+    state.team.sync_local_sessions_now();
+    Ok(record)
+}
+
+#[tauri::command(async)]
+pub fn set_session_shared(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    shared: bool,
+) -> VeloxResult<SessionRecord> {
+    let record = state
+        .sessions
+        .set_session_shared(&app, &session_id, shared)?;
+    state.team.sync_local_sessions_now();
+    Ok(record)
 }
 
 #[tauri::command(async)]
